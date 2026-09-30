@@ -15,3 +15,19 @@ npm install axios
 # 4. App start karo
 npx expo start
 
+
+
+python virtual env set UP
+
+
+
+python -m venv venv
+# Windows:
+venv\Scripts\activate
+# Mac/Linux:
+source venv/bin/activate
+
+pip install pandas scikit-learn fastapi uvicorn joblib beautifulsoup4 lxml
+
+
+
