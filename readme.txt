@@ -31,3 +31,7 @@ pip install pandas scikit-learn fastapi uvicorn joblib beautifulsoup4 lxml
 
 
 
+cd frontend
+
+npm install react-native-sound react-native-linear-gradient react-native-svg
+
