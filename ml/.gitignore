@@ -1,0 +1,18 @@
+# Datasets: big + re-creatable. Keep folder structure only (via .gitkeep)
+datasets/*/raw/*
+datasets/*/external/*
+datasets/*/processed/*
+!datasets/**/.gitkeep
+
+# Trained models / vectorizers (decide later how to share)
+models/*.joblib
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
