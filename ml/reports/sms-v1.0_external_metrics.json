@@ -1,0 +1,18 @@
+{
+  "model_version": "sms-v1.0",
+  "external_dataset": "UCI SMS Spam Collection (binary HAM vs scam only)",
+  "note": "UCI has no SMISHING class. 85% of UCI was already in primary data; only independent rows scored.",
+  "rows_start": 5574,
+  "rows_after_internal_dedupe": 5160,
+  "rows_final_after_primary_overlap_removal": 683,
+  "metrics": {
+    "scam_precision": 0.9812,
+    "scam_recall": 0.9924,
+    "scam_f1": 0.9868,
+    "brier_score": 0.0246,
+    "scams_marked_ham": 2,
+    "scams_total": 263,
+    "ham_flagged": 5,
+    "ham_total": 420
+  }
+}
