@@ -1,0 +1,21 @@
+{
+  "model_version": "sms-v1.0",
+  "trained_on": "2026-10-09",
+  "algorithm": "TF-IDF + LogisticRegression (multinomial, class_weight=balanced)",
+  "selection": "5-fold CV on train: LR macro-F1 0.892 vs SVM 0.898 (tie, std ~0.02); LR chosen by lower scam_as_HAM and native probabilities",
+  "labels": {
+    "0": "HAM",
+    "1": "SPAM",
+    "2": "SMISHING"
+  },
+  "scam_probability": "1 - P(HAM) = P(SPAM) + P(SMISHING)",
+  "scam_threshold": 0.5,
+  "train_rows": 4057,
+  "test_metrics": {
+    "macro_f1": 0.9057,
+    "scams_marked_ham": 8,
+    "scams_total": 144,
+    "ham_flagged": 6,
+    "ham_total": 726
+  }
+}
