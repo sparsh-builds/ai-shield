@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "react-native-linear-gradient": "^2.8.3",
+    "react-native-sound": "^0.13.0",
+    "react-native-svg": "^15.15.5"
+  }
+}

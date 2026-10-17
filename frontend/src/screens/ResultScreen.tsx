@@ -2,7 +2,7 @@ import React, {useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import {sendFeedback} from '../api';
-import {RiskLevel, RootStackParamList} from '../types';
+import {RiskLevel, RootStackParamList} from '../utils/types';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Result'>;
 

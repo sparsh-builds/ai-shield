@@ -1,5 +1,5 @@
 import {API_BASE_URL, USE_MOCK_ANALYSIS} from './config';
-import {AnalysisResult, EmailFull, RiskLevel} from './types';
+import {AnalysisResult, EmailFull, RiskLevel} from './utils/types';
 
 const ACTIONS: Record<RiskLevel, string> = {
   HIGH: 'Do not open links or attachments. Do not reply. Report as phishing and delete.',
