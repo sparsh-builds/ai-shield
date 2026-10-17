@@ -1,0 +1,21 @@
+# Datasets: big + re-creatable. Keep folder structure only (via .gitkeep)
+datasets/*/raw/*
+datasets/*/external/*
+datasets/*/processed/*
+!datasets/**/.gitkeep
+
+# # Trained models / vectorizers (decide later how to share)
+# models/*.joblib
+
+# Trained models are small (about 4 MB) and versioned, so they ARE committed.
+# If a future model grows past ~50 MB, ignore it and share another way.
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
