@@ -1,74 +1,58 @@
-import {
-  GoogleSignin,
-  statusCodes,
-} from '@react-native-google-signin/google-signin';
-import {WEB_CLIENT_ID} from './config';
-
-export const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
-
-export type AppUser = {email: string; name?: string | null; photo?: string | null};
+import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
+import { GMAIL_SCOPE, GOOGLE_WEB_CLIENT_ID } from './config';
 
 export function configureGoogle() {
   GoogleSignin.configure({
-    webClientId: WEB_CLIENT_ID,
-    scopes: [GMAIL_SCOPE], // read-only Gmail access
+    webClientId: GOOGLE_WEB_CLIENT_ID,
+    scopes: [GMAIL_SCOPE],
+    offlineAccess: false,
   });
 }
 
-// The response shape differs between library versions, so handle both.
-function toUser(res: any): AppUser | null {
-  if (!res || res.type === 'cancelled' || res.type === 'noSavedCredentialFound') {
-    return null;
-  }
-  const u = res.data?.user ?? res.user;
-  if (!u?.email) return null;
-  return {email: u.email, name: u.name, photo: u.photo};
-}
-
-export async function signInWithGoogle(): Promise<AppUser | null> {
-  await GoogleSignin.hasPlayServices({showPlayServicesUpdateDialog: true});
-  const res: any = await GoogleSignin.signIn();
-  return toUser(res);
-}
-
-export async function restoreSession(): Promise<AppUser | null> {
+export async function isSignedIn(): Promise<boolean> {
   try {
-    const res: any = await GoogleSignin.signInSilently();
-    return toUser(res);
+    return await GoogleSignin.isSignedIn();
   } catch {
-    return null;
+    return false;
+  }
+}
+
+export async function signIn(): Promise<void> {
+  try {
+    await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+    await GoogleSignin.signIn();
+  } catch (e: any) {
+    if (e?.code === statusCodes.SIGN_IN_CANCELLED) {
+      throw new Error('Sign-in cancel ho gaya.');
+    }
+    if (e?.code === statusCodes.IN_PROGRESS) {
+      throw new Error('Sign-in pehle se chal raha hai.');
+    }
+    if (e?.code === statusCodes.PLAY_SERVICES_NOT_AVAILABLE) {
+      throw new Error('Google Play Services available nahi hai.');
+    }
+    throw new Error(e?.message ?? 'Sign-in fail ho gaya.');
+  }
+}
+
+export async function signOut(): Promise<void> {
+  try {
+    await GoogleSignin.signOut();
+  } catch {
+    // ignore
   }
 }
 
 export async function getAccessToken(): Promise<string> {
-  const {accessToken} = await GoogleSignin.getTokens();
-  return accessToken;
+  const tokens = await GoogleSignin.getTokens();
+  return tokens.accessToken;
 }
 
-export async function clearAccessToken(token: string) {
+export async function getUserEmail(): Promise<string | null> {
   try {
-    await GoogleSignin.clearCachedAccessToken(token);
-  } catch {}
-}
-
-export async function signOut() {
-  try {
-    await GoogleSignin.signOut();
-  } catch {}
-}
-
-export function explainAuthError(e: any): string {
-  switch (e?.code) {
-    case statusCodes.SIGN_IN_CANCELLED:
-      return 'Sign-in cancelled.';
-    case statusCodes.IN_PROGRESS:
-      return 'Sign-in already in progress.';
-    case statusCodes.PLAY_SERVICES_NOT_AVAILABLE:
-      return 'Google Play Services not available. Use an emulator/phone with Google Play.';
-    case '10':
-    case 'DEVELOPER_ERROR':
-      return 'DEVELOPER_ERROR: check package name, SHA-1 and Web Client ID in Google Cloud.';
-    default:
-      return e?.message ?? 'Sign-in failed.';
+    const user = await GoogleSignin.getCurrentUser();
+    return user?.user.email ?? null;
+  } catch {
+    return null;
   }
 }

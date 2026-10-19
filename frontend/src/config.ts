@@ -1,12 +1,13 @@
-// ---- AI Shield config ----
-// Web client ID from Google Cloud Console (OAuth client of type "Web application")
-export const WEB_CLIENT_ID = '478021555151-shn1mi2m7qtfgmm2snkrek6fbjdsf48d.apps.googleusercontent.com';
+// Backend ka URL.
+// Android emulator ke liye: http://10.0.2.2:8000
+// Real phone (same WiFi) ke liye: http://<PC-ka-IP>:8000
+// Deploy hone ke baad: https://your-domain.com
+export const API_URL = 'http://10.0.2.2:8000';
 
-// Backend base URL.
-//  - Android emulator  -> http://10.0.2.2:8080  (10.0.2.2 = your laptop)
-//  - Real phone        -> http://<laptop-wifi-ip>:8080  (same Wi-Fi)
-export const API_BASE_URL = 'http://10.0.2.2:8080';
+// Google Cloud Console > Credentials > "Web application" OAuth client ID
+export const GOOGLE_WEB_CLIENT_ID = 'YOUR_WEB_CLIENT_ID.apps.googleusercontent.com';
 
-// true  = local placeholder scoring (demo only, NOT the real ML model)
-// false = call the Spring Boot backend
-export const USE_MOCK_ANALYSIS = true;
+export const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+
+export const INBOX_PAGE_SIZE = 20;
+export const REQUEST_TIMEOUT_MS = 20000;

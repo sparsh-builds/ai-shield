@@ -1,20 +1,31 @@
+import { Vibration } from 'react-native';
 import Sound from 'react-native-sound';
 
 Sound.setCategory('Playback');
 
-const loadSound = (filename: string) => {
-  return new Sound(filename, Sound.MAIN_BUNDLE, (error) => {
-    if (error) console.log(`Failed to load ${filename}`, error);
-  });
-};
+let alertSound: Sound | null = null;
 
-export const sounds = {
-  scan: loadSound('scan.mp3'),
-  threat: loadSound('threat_alert.mp3'),
-  safe: loadSound('safe_beep.mp3'),
-  play(type: 'scan' | 'threat' | 'safe') {
-    sounds[type]?.play((success) => {
-      if (!success) sounds[type]?.reset();
-    });
+// Optional: android/app/src/main/res/raw/alert.mp3 rakh do.
+// File na ho to bhi app crash nahi hoga, sirf vibration hoga.
+function loadSound() {
+  if (alertSound) {
+    return;
   }
-};
+  alertSound = new Sound('alert.mp3', Sound.MAIN_BUNDLE, error => {
+    if (error) {
+      alertSound = null;
+    }
+  });
+}
+
+export function playPhishingAlert() {
+  Vibration.vibrate([0, 400, 200, 400]);
+  loadSound();
+  if (alertSound) {
+    alertSound.stop(() => alertSound?.play());
+  }
+}
+
+export function playSafeTone() {
+  Vibration.vibrate(80);
+}

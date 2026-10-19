@@ -1,58 +1,94 @@
-import React, {useCallback, useEffect, useLayoutEffect, useState} from 'react';
-import {ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, Text, View} from 'react-native';
-import type {NativeStackScreenProps} from '@react-navigation/native-stack';
-import {signOut} from '../auth';
-import {listInbox} from '../gmail';
-import {EmailSummary, RootStackParamList} from '../types';
+import React, { useCallback, useLayoutEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useFocusEffect } from '@react-navigation/native';
+import { fetchInbox } from '../gmail';
+import { signOut } from '../auth';
+import { colors, radius, spacing } from '../theme';
+import { Email, RootStackParamList } from '../utils/types';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Inbox'>;
 
-export default function InboxScreen({navigation}: Props) {
-  const [emails, setEmails] = useState<EmailSummary[]>([]);
+export default function InboxScreen({ navigation }: Props) {
+  const [emails, setEmails] = useState<Email[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (pull = false) => {
-    pull ? setRefreshing(true) : setLoading(true);
-    setError('');
+  const load = useCallback(async (isRefresh = false) => {
+    isRefresh ? setRefreshing(true) : setLoading(true);
+    setError(null);
     try {
-      setEmails(await listInbox(20));
+      setEmails(await fetchInbox());
     } catch (e: any) {
-      setError(e?.message ?? 'Could not load inbox.');
+      setError(e?.message ?? 'Emails load nahi ho paye');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useFocusEffect(
+    useCallback(() => {
+      if (emails.length === 0) {
+        load();
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []),
+  );
 
   useLayoutEffect(() => {
     navigation.setOptions({
       headerRight: () => (
-        <Pressable
-          onPress={async () => {
-            await signOut();
-            navigation.replace('Login');
-          }}>
-          <Text style={{color: '#1F3A6E', fontWeight: '600'}}>Sign out</Text>
-        </Pressable>
+        <View style={{ flexDirection: 'row', gap: 16 }}>
+          <TouchableOpacity onPress={() => navigation.navigate('Scan')}>
+            <Text style={styles.headerBtn}>Scan</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() =>
+              Alert.alert('Logout', 'Sign out karna hai?', [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Logout',
+                  style: 'destructive',
+                  onPress: async () => {
+                    await signOut();
+                    navigation.replace('Login');
+                  },
+                },
+              ])
+            }>
+            <Text style={styles.headerBtn}>Logout</Text>
+          </TouchableOpacity>
+        </View>
       ),
     });
   }, [navigation]);
 
-  if (loading) return <ActivityIndicator size="large" style={{marginTop: 40}} />;
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
 
   if (error) {
     return (
-      <View style={s.center}>
-        <Text style={s.err}>{error}</Text>
-        <Pressable style={s.retry} onPress={() => load()}>
-          <Text style={{color: '#fff', fontWeight: '700'}}>Retry</Text>
-        </Pressable>
+      <View style={styles.center}>
+        <Text style={styles.errorText}>{error}</Text>
+        <TouchableOpacity style={styles.retry} onPress={() => load()}>
+          <Text style={styles.retryText}>Dobara try karo</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -60,27 +96,59 @@ export default function InboxScreen({navigation}: Props) {
   return (
     <FlatList
       data={emails}
-      keyExtractor={e => e.id}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} />}
-      ListEmptyComponent={<Text style={s.empty}>No emails found in your inbox.</Text>}
-      renderItem={({item}) => (
-        <Pressable style={s.row} onPress={() => navigation.navigate('EmailDetail', {id: item.id})}>
-          <Text style={s.from} numberOfLines={1}>{item.from}</Text>
-          <Text style={s.subject} numberOfLines={1}>{item.subject}</Text>
-          <Text style={s.snippet} numberOfLines={2}>{item.snippet}</Text>
-        </Pressable>
+      keyExtractor={item => item.id}
+      contentContainerStyle={{ padding: spacing.md }}
+      refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={colors.primary} />
+      }
+      ListEmptyComponent={<Text style={styles.empty}>Inbox khaali hai</Text>}
+      renderItem={({ item }) => (
+        <TouchableOpacity
+          style={styles.card}
+          activeOpacity={0.8}
+          onPress={() => navigation.navigate('EmailDetail', { email: item })}>
+          <Text style={styles.from} numberOfLines={1}>
+            {item.from}
+          </Text>
+          <Text style={styles.subject} numberOfLines={1}>
+            {item.subject}
+          </Text>
+          <Text style={styles.snippet} numberOfLines={2}>
+            {item.snippet}
+          </Text>
+        </TouchableOpacity>
       )}
     />
   );
 }
 
-const s = StyleSheet.create({
-  center: {flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24},
-  err: {color: '#B3261E', textAlign: 'center'},
-  retry: {marginTop: 14, backgroundColor: '#1F3A6E', paddingVertical: 10, paddingHorizontal: 22, borderRadius: 8},
-  empty: {textAlign: 'center', marginTop: 40, color: '#666'},
-  row: {padding: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: '#ccc', backgroundColor: '#fff'},
-  from: {fontWeight: '700', color: '#222'},
-  subject: {marginTop: 2, color: '#1F3A6E', fontWeight: '600'},
-  snippet: {marginTop: 2, color: '#666'},
+const styles = StyleSheet.create({
+  center: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.bg,
+    padding: spacing.lg,
+  },
+  headerBtn: { color: '#fff', fontSize: 15, fontWeight: '600' },
+  card: {
+    backgroundColor: colors.card,
+    borderRadius: radius.md,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  from: { color: colors.textMuted, fontSize: 12 },
+  subject: { color: colors.text, fontSize: 16, fontWeight: '700', marginVertical: 2 },
+  snippet: { color: colors.textMuted, fontSize: 13, lineHeight: 18 },
+  empty: { color: colors.textMuted, textAlign: 'center', marginTop: spacing.xl },
+  errorText: { color: colors.phishing, textAlign: 'center', marginBottom: spacing.md },
+  retry: {
+    backgroundColor: colors.primary,
+    paddingVertical: 10,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.sm,
+  },
+  retryText: { color: '#fff', fontWeight: '700' },
 });

@@ -1,79 +1,128 @@
-import React, {useState} from 'react';
-import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
-import type {NativeStackScreenProps} from '@react-navigation/native-stack';
-import {sendFeedback} from '../api';
-import {RiskLevel, RootStackParamList} from '../utils/types';
+import React, { useEffect } from 'react';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { colors, radius, spacing, verdictColor, verdictLabel } from '../theme';
+import { playPhishingAlert, playSafeTone } from '../utils/sound';
+import { RootStackParamList } from '../utils/types';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Result'>;
 
-const COLORS: Record<RiskLevel, {bg: string; fg: string}> = {
-  HIGH: {bg: '#FDECEA', fg: '#B3261E'},
-  MEDIUM: {bg: '#FFF4E5', fg: '#B26A00'},
-  LOW: {bg: '#E6F4EA', fg: '#0B6B2E'},
+const ICONS: Record<string, string> = {
+  safe: '✅',
+  suspicious: '⚠️',
+  spam: '🚫',
+  phishing: '🚨',
 };
 
-export default function ResultScreen({route, navigation}: Props) {
-  const {email, result} = route.params;
-  const c = COLORS[result.riskLevel] ?? COLORS.MEDIUM;
-  const [fb, setFb] = useState<'' | 'yes' | 'no'>('');
+export default function ResultScreen({ route, navigation }: Props) {
+  const { result, kind, preview } = route.params;
+  const color = verdictColor(result.verdict);
+  const percent = Math.round(result.confidence * 100);
 
-  const give = async (correct: boolean) => {
-    setFb(correct ? 'yes' : 'no');
-    try {
-      await sendFeedback(email.id, correct);
-    } catch {}
-  };
+  useEffect(() => {
+    if (result.verdict === 'phishing' || result.verdict === 'spam') {
+      playPhishingAlert();
+    } else if (result.verdict === 'safe') {
+      playSafeTone();
+    }
+  }, [result.verdict]);
 
   return (
-    <ScrollView contentContainerStyle={{padding: 16}} style={{backgroundColor: '#fff'}}>
-      {result.mock && (
-        <Text style={s.mock}>DEMO MODE: placeholder rules, not the trained ML model yet.</Text>
-      )}
-      <View style={[s.card, {backgroundColor: c.bg}]}>
-        <Text style={[s.level, {color: c.fg}]}>{result.riskLevel} RISK</Text>
-        <Text style={[s.score, {color: c.fg}]}>{result.riskScore}/100</Text>
-        <Text style={{color: c.fg, fontWeight: '600'}}>
-          {result.category}  |  Scam probability {(result.scamProbability * 100).toFixed(0)}%
+    <ScrollView contentContainerStyle={styles.container}>
+      <View style={[styles.badge, { borderColor: color }]}>
+        <Text style={styles.icon}>{ICONS[result.verdict] ?? '❔'}</Text>
+        <Text style={[styles.verdict, { color }]}>{verdictLabel(result.verdict)}</Text>
+        <Text style={styles.kind}>{kind} scan</Text>
+      </View>
+
+      <Text style={styles.label}>Confidence</Text>
+      <View style={styles.barBg}>
+        <View style={[styles.barFill, { width: `${percent}%`, backgroundColor: color }]} />
+      </View>
+      <Text style={styles.percent}>{percent}%</Text>
+
+      <Text style={styles.label}>Scanned content</Text>
+      <View style={styles.card}>
+        <Text style={styles.preview} numberOfLines={4}>
+          {preview}
         </Text>
       </View>
 
-      <Text style={s.h}>Why?</Text>
-      {result.reasons.map(r => (
-        <Text key={r} style={s.li}>• {r}</Text>
-      ))}
+      <Text style={styles.label}>Kyun?</Text>
+      <View style={styles.card}>
+        {result.reasons.length === 0 ? (
+          <Text style={styles.reason}>Koi khaas wajah nahi mili.</Text>
+        ) : (
+          result.reasons.map((r, i) => (
+            <Text key={i} style={styles.reason}>
+              •  {r}
+            </Text>
+          ))
+        )}
+      </View>
 
-      <Text style={s.h}>Recommended action</Text>
-      <Text style={s.li}>{result.recommendedAction}</Text>
-
-      <Text style={s.small}>Email: {email.subject}</Text>
-      {result.modelVersion && <Text style={s.small}>Model: {result.modelVersion}</Text>}
-
-      <Text style={s.h}>Was this result correct?</Text>
-      {fb ? (
-        <Text style={s.li}>Thanks for your feedback.</Text>
-      ) : (
-        <View style={{flexDirection: 'row', gap: 10}}>
-          <Pressable style={s.fbBtn} onPress={() => give(true)}><Text style={s.fbText}>Yes</Text></Pressable>
-          <Pressable style={s.fbBtn} onPress={() => give(false)}><Text style={s.fbText}>No</Text></Pressable>
+      {result.verdict !== 'safe' && (
+        <View style={[styles.warning, { borderColor: color }]}>
+          <Text style={styles.warningText}>
+            Links par click na karo, personal info, OTP ya password share na karo.
+          </Text>
         </View>
       )}
 
-      <Pressable style={s.back} onPress={() => navigation.popToTop()}>
-        <Text style={{color: '#1F3A6E', fontWeight: '700'}}>Back to inbox</Text>
-      </Pressable>
+      <TouchableOpacity style={styles.btn} onPress={() => navigation.goBack()}>
+        <Text style={styles.btnText}>Wapas jao</Text>
+      </TouchableOpacity>
     </ScrollView>
   );
 }
 
-const s = StyleSheet.create({
-  mock: {backgroundColor: '#FFF8E1', color: '#8A6100', padding: 8, borderRadius: 6, marginBottom: 10, fontSize: 12},
-  card: {padding: 20, borderRadius: 14, alignItems: 'center'},
-  level: {fontSize: 22, fontWeight: '800'},
-  score: {fontSize: 48, fontWeight: '900', marginVertical: 4},
-  h: {marginTop: 20, fontWeight: '800', fontSize: 16, color: '#1F3A6E'},
-  li: {marginTop: 6, color: '#222', lineHeight: 21},
-  small: {marginTop: 10, color: '#777', fontSize: 12},
-  fbBtn: {borderWidth: 1, borderColor: '#1F3A6E', paddingVertical: 8, paddingHorizontal: 22, borderRadius: 8, marginTop: 8},
-  fbText: {color: '#1F3A6E', fontWeight: '700'},
-  back: {marginTop: 26, alignItems: 'center', padding: 12},
+const styles = StyleSheet.create({
+  container: { padding: spacing.lg },
+  badge: {
+    alignItems: 'center',
+    borderWidth: 2,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
+    backgroundColor: colors.card,
+    marginBottom: spacing.lg,
+  },
+  icon: { fontSize: 56 },
+  verdict: { fontSize: 32, fontWeight: '900', marginTop: spacing.sm },
+  kind: { color: colors.textMuted, marginTop: 4 },
+  label: {
+    color: colors.textMuted,
+    fontSize: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    marginTop: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  barBg: { height: 12, borderRadius: 6, backgroundColor: colors.border, overflow: 'hidden' },
+  barFill: { height: '100%', borderRadius: 6 },
+  percent: { color: colors.text, fontWeight: '700', marginTop: 6 },
+  card: {
+    backgroundColor: colors.card,
+    borderRadius: radius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  preview: { color: colors.text, fontSize: 14, lineHeight: 20 },
+  reason: { color: colors.text, fontSize: 14, lineHeight: 22 },
+  warning: {
+    marginTop: spacing.lg,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    padding: spacing.md,
+    backgroundColor: '#2A1215',
+  },
+  warningText: { color: colors.text, fontSize: 14, lineHeight: 20 },
+  btn: {
+    marginTop: spacing.lg,
+    backgroundColor: colors.primary,
+    paddingVertical: 14,
+    borderRadius: radius.md,
+    alignItems: 'center',
+  },
+  btnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
 });

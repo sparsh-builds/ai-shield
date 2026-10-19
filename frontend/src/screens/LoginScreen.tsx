@@ -1,62 +1,87 @@
-import React, {useEffect, useState} from 'react';
-import {ActivityIndicator, Pressable, StyleSheet, Text, View} from 'react-native';
-import type {NativeStackScreenProps} from '@react-navigation/native-stack';
-import {explainAuthError, restoreSession, signInWithGoogle} from '../auth';
-import {RootStackParamList} from '../types';
+import React, { useState } from 'react';
+import { ActivityIndicator, Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { signIn } from '../auth';
+import { colors, radius, spacing } from '../theme';
+import { RootStackParamList } from '../utils/types';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Login'>;
 
-export default function LoginScreen({navigation}: Props) {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+export default function LoginScreen({ navigation }: Props) {
+  const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      const u = await restoreSession();
-      if (u) navigation.replace('Inbox');
-      else setLoading(false);
-    })();
-  }, [navigation]);
-
-  const onSignIn = async () => {
-    setLoading(true);
-    setError('');
+  const onLogin = async () => {
+    setBusy(true);
     try {
-      const u = await signInWithGoogle();
-      if (u) navigation.replace('Inbox');
-      else setLoading(false);
+      await signIn();
+      navigation.replace('Inbox');
     } catch (e: any) {
-      setError(explainAuthError(e));
-      setLoading(false);
+      Alert.alert('Login fail', e?.message ?? 'Kuch galat ho gaya');
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
-    <View style={s.wrap}>
-      <Text style={s.logo}>🛡️</Text>
-      <Text style={s.title}>AI Shield</Text>
-      <Text style={s.sub}>
-        Check if an email is phishing or a scam. We only request read-only access to your Gmail and
-        analyze only the email you select.
+    <View style={styles.container}>
+      <Text style={styles.logo}>🛡️</Text>
+      <Text style={styles.title}>PhishGuard</Text>
+      <Text style={styles.subtitle}>
+        Email, SMS aur links ko scan karke phishing aur spam pehchaano.
       </Text>
-      {loading ? (
-        <ActivityIndicator size="large" style={{marginTop: 24}} />
-      ) : (
-        <Pressable style={s.btn} onPress={onSignIn}>
-          <Text style={s.btnText}>Sign in with Google</Text>
-        </Pressable>
-      )}
-      {!!error && <Text style={s.err}>{error}</Text>}
+
+      <TouchableOpacity style={styles.button} onPress={onLogin} disabled={busy} activeOpacity={0.85}>
+        {busy ? (
+          <ActivityIndicator color="#fff" />
+        ) : (
+          <Text style={styles.buttonText}>Google se Sign in karo</Text>
+        )}
+      </TouchableOpacity>
+
+      <TouchableOpacity onPress={() => navigation.navigate('Scan')} style={styles.skip}>
+        <Text style={styles.skipText}>Bina login ke SMS / URL scan karo</Text>
+      </TouchableOpacity>
+
+      <Text style={styles.note}>
+        Hum sirf read-only access lete hain. Aapki emails kabhi modify ya delete nahi hongi.
+      </Text>
     </View>
   );
 }
 
-const s = StyleSheet.create({
-  wrap: {flex: 1, alignItems: 'center', justifyContent: 'center', padding: 28, backgroundColor: '#fff'},
-  logo: {fontSize: 64},
-  title: {fontSize: 30, fontWeight: '800', color: '#1F3A6E', marginTop: 8},
-  sub: {textAlign: 'center', color: '#555', marginTop: 12, lineHeight: 21},
-  btn: {marginTop: 28, backgroundColor: '#1F3A6E', paddingVertical: 14, paddingHorizontal: 28, borderRadius: 10},
-  btnText: {color: '#fff', fontWeight: '700', fontSize: 16},
-  err: {color: '#B3261E', marginTop: 16, textAlign: 'center'},
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: colors.bg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.lg,
+  },
+  logo: { fontSize: 72, marginBottom: spacing.sm },
+  title: { color: colors.text, fontSize: 32, fontWeight: '800' },
+  subtitle: {
+    color: colors.textMuted,
+    fontSize: 15,
+    textAlign: 'center',
+    marginTop: spacing.sm,
+    marginBottom: spacing.xl,
+    lineHeight: 22,
+  },
+  button: {
+    backgroundColor: colors.primary,
+    paddingVertical: 14,
+    paddingHorizontal: spacing.xl,
+    borderRadius: radius.md,
+    minWidth: 260,
+    alignItems: 'center',
+  },
+  buttonText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  skip: { marginTop: spacing.md, padding: spacing.sm },
+  skipText: { color: colors.primary, fontSize: 14 },
+  note: {
+    color: colors.textMuted,
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: spacing.xl,
+  },
 });

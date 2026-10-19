@@ -1,75 +1,73 @@
-import {Buffer} from 'buffer';
-import {clearAccessToken, getAccessToken} from './auth';
-import {EmailFull, EmailSummary} from './types';
+import { getAccessToken } from './auth';
+import { INBOX_PAGE_SIZE } from './config';
+import { Email } from './utils/types';
 
 const BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 
-async function gmailGet(path: string, retry = true): Promise<any> {
-  const token = await getAccessToken();
-  const r = await fetch(`${BASE}${path}`, {
-    headers: {Authorization: `Bearer ${token}`},
-  });
-  if (r.status === 401 && retry) {
-    await clearAccessToken(token); // token expired -> get a fresh one
-    return gmailGet(path, false);
+// ---------- base64url decode (UTF-8 safe, kisi extra library ke bina) ----------
+const CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+function base64UrlToBytes(input: string): number[] {
+  const str = input.replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, '');
+  const bytes: number[] = [];
+  let buffer = 0;
+  let bits = 0;
+  for (let i = 0; i < str.length; i++) {
+    const idx = CHARS.indexOf(str[i]);
+    if (idx < 0) {
+      continue;
+    }
+    buffer = (buffer << 6) | idx;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((buffer >> bits) & 0xff);
+    }
   }
-  if (r.status === 403) {
-    throw new Error(
-      'Gmail access denied (403). Enable Gmail API in Google Cloud and grant the Gmail permission.',
-    );
-  }
-  if (!r.ok) throw new Error(`Gmail API error ${r.status}`);
-  return r.json();
+  return bytes;
 }
 
-const header = (m: any, name: string): string =>
-  m.payload?.headers?.find(
-    (h: any) => h.name?.toLowerCase() === name.toLowerCase(),
-  )?.value ?? '';
-
-export async function listInbox(max = 20): Promise<EmailSummary[]> {
-  const list = await gmailGet(`/messages?maxResults=${max}&labelIds=INBOX`);
-  const ids: {id: string}[] = list.messages ?? [];
-  return Promise.all(
-    ids.map(async ({id}) => {
-      const m = await gmailGet(
-        `/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`,
+function utf8Decode(bytes: number[]): string {
+  let out = '';
+  let i = 0;
+  while (i < bytes.length) {
+    const b = bytes[i++];
+    if (b < 0x80) {
+      out += String.fromCharCode(b);
+    } else if (b < 0xe0) {
+      out += String.fromCharCode(((b & 0x1f) << 6) | (bytes[i++] & 0x3f));
+    } else if (b < 0xf0) {
+      out += String.fromCharCode(
+        ((b & 0x0f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f),
       );
-      return {
-        id,
-        threadId: m.threadId,
-        subject: header(m, 'Subject') || '(no subject)',
-        from: header(m, 'From'),
-        date: header(m, 'Date'),
-        snippet: m.snippet ?? '',
-      };
-    }),
-  );
-}
-
-function decode(data?: string): string {
-  if (!data) return '';
-  return Buffer.from(
-    data.replace(/-/g, '+').replace(/_/g, '/'),
-    'base64',
-  ).toString('utf-8');
-}
-
-function collect(part: any, out: {plain: string; html: string}) {
-  if (!part) return;
-  if (part.mimeType === 'text/plain' && part.body?.data) {
-    out.plain += decode(part.body.data);
-  } else if (part.mimeType === 'text/html' && part.body?.data) {
-    out.html += decode(part.body.data);
+    } else {
+      const cp =
+        ((b & 0x07) << 18) |
+        ((bytes[i++] & 0x3f) << 12) |
+        ((bytes[i++] & 0x3f) << 6) |
+        (bytes[i++] & 0x3f);
+      const c = cp - 0x10000;
+      out += String.fromCharCode(0xd800 + (c >> 10), 0xdc00 + (c & 0x3ff));
+    }
   }
-  (part.parts ?? []).forEach((p: any) => collect(p, out));
+  return out;
 }
 
-function htmlToText(html: string): string {
+function decodeBody(data?: string): string {
+  if (!data) {
+    return '';
+  }
+  return utf8Decode(base64UrlToBytes(data));
+}
+
+// ---------- Gmail payload parsing ----------
+function stripHtml(html: string): string {
   return html
-    .replace(/<(style|script)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<a\s[^>]*href=["']([^"']+)["'][^>]*>/gi, ' $1 ')
     .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
@@ -82,34 +80,84 @@ function htmlToText(html: string): string {
     .trim();
 }
 
-const URL_RE = /https?:\/\/[^\s<>"')\]]+/gi;
-
-export function extractUrls(plain: string, html: string): string[] {
-  const found = new Set<string>();
-  const add = (u: string) => found.add(u.replace(/[.,;:!?]+$/, ''));
-  (plain.match(URL_RE) ?? []).forEach(add);
-  // links hidden behind button/anchor text only exist in the HTML
-  const hrefRe = /href\s*=\s*["']([^"']+)["']/gi;
-  let m: RegExpExecArray | null;
-  while ((m = hrefRe.exec(html)) !== null) {
-    if (/^https?:\/\//i.test(m[1])) add(m[1]);
+function extractBody(payload: any): string {
+  if (!payload) {
+    return '';
   }
-  return Array.from(found);
+
+  let plain = '';
+  let html = '';
+
+  const walk = (part: any) => {
+    if (!part) {
+      return;
+    }
+    if (part.mimeType === 'text/plain' && part.body?.data && !plain) {
+      plain = decodeBody(part.body.data);
+    } else if (part.mimeType === 'text/html' && part.body?.data && !html) {
+      html = decodeBody(part.body.data);
+    }
+    if (Array.isArray(part.parts)) {
+      part.parts.forEach(walk);
+    }
+  };
+
+  walk(payload);
+
+  if (!plain && !html && payload.body?.data) {
+    plain = decodeBody(payload.body.data);
+  }
+
+  return plain || stripHtml(html);
 }
 
-export async function getEmail(id: string): Promise<EmailFull> {
-  const m = await gmailGet(`/messages/${id}?format=full`);
-  const out = {plain: '', html: ''};
-  collect(m.payload, out);
-  const body = (out.plain || htmlToText(out.html)).trim();
+function header(payload: any, name: string): string {
+  const h = (payload?.headers ?? []).find(
+    (x: any) => String(x.name).toLowerCase() === name.toLowerCase(),
+  );
+  return h?.value ?? '';
+}
+
+function toEmail(msg: any): Email {
   return {
-    id,
-    threadId: m.threadId,
-    subject: header(m, 'Subject') || '(no subject)',
-    from: header(m, 'From'),
-    date: header(m, 'Date'),
-    snippet: m.snippet ?? '',
-    body,
-    urls: extractUrls(out.plain, out.html),
+    id: msg.id,
+    from: header(msg.payload, 'From'),
+    subject: header(msg.payload, 'Subject') || '(no subject)',
+    date: header(msg.payload, 'Date'),
+    snippet: msg.snippet ?? '',
+    body: extractBody(msg.payload),
   };
+}
+
+// ---------- Public API ----------
+async function gmailFetch(path: string): Promise<any> {
+  const token = await getAccessToken();
+  const res = await fetch(`${BASE}${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Gmail API error (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function fetchInbox(max: number = INBOX_PAGE_SIZE): Promise<Email[]> {
+  const list = await gmailFetch(`/messages?maxResults=${max}&labelIds=INBOX`);
+  const ids: string[] = (list.messages ?? []).map((m: any) => m.id);
+
+  const emails = await Promise.all(
+    ids.map(async id => {
+      const msg = await gmailFetch(`/messages/${id}?format=full`);
+      return toEmail(msg);
+    }),
+  );
+  return emails;
+}
+
+export async function fetchSpamFolder(max: number = INBOX_PAGE_SIZE): Promise<Email[]> {
+  const list = await gmailFetch(`/messages?maxResults=${max}&labelIds=SPAM`);
+  const ids: string[] = (list.messages ?? []).map((m: any) => m.id);
+  return Promise.all(
+    ids.map(async id => toEmail(await gmailFetch(`/messages/${id}?format=full`))),
+  );
 }
