@@ -21,16 +21,17 @@ Clone the repository and switch to the development branch:
 
 ```bash
 # Clone the repository
-git clone [https://github.com/](https://github.com/)<your-org-or-username>/ai-shield.git
+git clone "https://github.com/sparsh-builds/ai-shield"
 
 # Move into the project directory
 cd ai-shield
 
-# Ensure you have the latest remote tracking branches
-git fetch origin
 
-# Switch to the shared integration branch
-git checkout develop
+## ML 
+
+cd ml
+
+pip install -r requirements.txt
 
 
 
