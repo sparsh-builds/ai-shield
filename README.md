@@ -26,7 +26,7 @@ Android app (React Native)  --HTTP/JSON-->  FastAPI backend  -->  aapke trained 
 ## 1. Clone
 
 ```bash
-git clone <REPO_URL> ai-shield
+git clone "https://github.com/sparsh-builds/ai-shield"
 cd ai-shield
 ```
 
