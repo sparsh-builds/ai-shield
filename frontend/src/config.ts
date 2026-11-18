@@ -1,0 +1,1 @@
+export const API_URL = 'https://ai-shield-backend-6o9v.onrender.com';

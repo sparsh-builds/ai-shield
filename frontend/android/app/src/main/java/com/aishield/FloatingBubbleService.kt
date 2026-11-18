@@ -18,8 +18,8 @@ class FloatingBubbleService : Service() {
     private lateinit var bubbleView: View
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
 
-    // Backend FastAPI URL (Local network IP ya Tunnel)
-    private val BACKEND_URL = "http://10.5.52.240" // PC IP dalna agar real device hai
+    // Production Render Cloud Backend URL
+    private val BACKEND_URL = "https://ai-shield-backend-6o9v.onrender.com"
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -101,8 +101,8 @@ class FloatingBubbleService : Service() {
                     requestMethod = "POST"
                     setRequestProperty("Content-Type", "application/json")
                     doOutput = true
-                    connectTimeout = 5000
-                    readTimeout = 5000
+                    connectTimeout = 45000 // Increased for Render free-tier cold start wake-up
+                    readTimeout = 45000
                     outputStream.use { it.write(payload.toString().toByteArray()) }
                 }
 
