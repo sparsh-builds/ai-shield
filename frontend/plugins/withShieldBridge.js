@@ -9,7 +9,7 @@ module.exports = function withShieldBridge(config) {
     if (!contents.includes('ShieldBridgePackage')) {
       contents = contents.replace(
         'PackageList(this).packages.apply {',
-        'PackageList(this).packages.apply {\n              add(com.aishield.ShieldBridgePackage())'
+        'PackageList(this).packages.apply {\n              add(ShieldBridgePackage())'
       );
       config.modResults.contents = contents;
     }
@@ -29,16 +29,18 @@ module.exports = function withShieldBridge(config) {
     return config;
   });
 
-  // 3. Auto-generate res/xml/accessibility_service_config.xml
+  // 3. Auto-generate XML config + ShieldBridgeModule.kt + ShieldBridgePackage.kt
   config = withDangerousMod(config, [
     'android',
     async (config) => {
-      const xmlDir = path.join(config.modRequest.platformProjectRoot, 'app', 'src', 'main', 'res', 'xml');
-      fs.mkdirSync(xmlDir, { recursive: true });
-      const xmlFile = path.join(xmlDir, 'accessibility_service_config.xml');
+      const root = config.modRequest.platformProjectRoot;
 
-      if (!fs.existsSync(xmlFile)) {
-        const xmlContent = `<?xml version="1.0" encoding="utf-8"?>
+      // 3a. accessibility_service_config.xml
+      const xmlDir = path.join(root, 'app', 'src', 'main', 'res', 'xml');
+      fs.mkdirSync(xmlDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(xmlDir, 'accessibility_service_config.xml'),
+        `<?xml version="1.0" encoding="utf-8"?>
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/accessibility_service_description"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
@@ -46,9 +48,111 @@ module.exports = function withShieldBridge(config) {
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
     android:notificationTimeout="100" />
+`,
+        'utf8'
+      );
+
+      // 3b. Native Kotlin Bridge Files in com/aishield
+      const javaDir = path.join(root, 'app', 'src', 'main', 'java', 'com', 'aishield');
+      fs.mkdirSync(javaDir, { recursive: true });
+
+      const moduleKt = `package com.aishield
+
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.ReactContextBaseJavaModule
+import com.facebook.react.bridge.ReactMethod
+
+class ShieldBridgeModule(private val reactContext: ReactApplicationContext) :
+    ReactContextBaseJavaModule(reactContext) {
+
+    override fun getName(): String = "ShieldBridge"
+
+    @ReactMethod
+    fun openAccessibilitySettings(promise: Promise? = null) {
+        try {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            reactContext.startActivity(intent)
+            promise?.resolve(true)
+        } catch (e: Exception) {
+            promise?.reject("ERR_ACCESSIBILITY", e)
+        }
+    }
+
+    @ReactMethod
+    fun openOverlaySettings(promise: Promise? = null) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(reactContext)) {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + reactContext.packageName)
+                ).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                reactContext.startActivity(intent)
+            } else {
+                startBubbleService(null)
+            }
+            promise?.resolve(true)
+        } catch (e: Exception) {
+            promise?.reject("ERR_OVERLAY", e)
+        }
+    }
+
+    @ReactMethod
+    fun startBubbleService(promise: Promise? = null) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(reactContext)) {
+                openOverlaySettings(promise)
+                return
+            }
+            val intent = Intent(reactContext, FloatingBubbleService::class.java)
+            reactContext.startService(intent)
+            promise?.resolve(true)
+        } catch (e: Exception) {
+            promise?.reject("ERR_BUBBLE", e)
+        }
+    }
+
+    @ReactMethod
+    fun stopBubbleService(promise: Promise? = null) {
+        try {
+            val intent = Intent(reactContext, FloatingBubbleService::class.java)
+            reactContext.stopService(intent)
+            promise?.resolve(true)
+        } catch (e: Exception) {
+            promise?.reject("ERR_STOP_BUBBLE", e)
+        }
+    }
+}
 `;
-        fs.writeFileSync(xmlFile, xmlContent, 'utf8');
-      }
+      fs.writeFileSync(path.join(javaDir, 'ShieldBridgeModule.kt'), moduleKt, 'utf8');
+
+      const packageKt = `package com.aishield
+
+import com.facebook.react.ReactPackage
+import com.facebook.react.bridge.NativeModule
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.uimanager.ViewManager
+
+class ShieldBridgePackage : ReactPackage {
+    override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> {
+        return listOf(ShieldBridgeModule(reactContext))
+    }
+
+    override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> {
+        return emptyList()
+    }
+}
+`;
+      fs.writeFileSync(path.join(javaDir, 'ShieldBridgePackage.kt'), packageKt, 'utf8');
+
       return config;
     },
   ]);
