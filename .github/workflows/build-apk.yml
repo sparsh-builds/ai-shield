@@ -30,6 +30,11 @@ jobs:
           cd frontend
           npm install
 
+      - name: Generate Android Gradle Project
+        run: |
+          cd frontend
+          npx expo prebuild --platform android --no-install
+
       - name: Create Bundle
         run: |
           cd frontend
