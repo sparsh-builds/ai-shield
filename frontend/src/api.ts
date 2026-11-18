@@ -1,7 +1,7 @@
 import { Platform } from 'react-native';
 
-// Laptop's local network IP jo Expo detect kar raha hai
-const BASE_URL = 'http://10.5.52.59:8000';
+// Production Render Cloud Backend URL
+const BASE_URL = 'https://ai-shield-backend-6o9v.onrender.com';
 
 export interface ThreatUrlReport {
   url: string;
