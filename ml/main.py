@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
     artifacts.clear()
 
 
-app = FastAPI(title="AI Shield ML Engine", version="2.6.0", lifespan=lifespan)
+app = FastAPI(title="AI Shield ML Engine", version="2.7.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -162,23 +162,22 @@ def fuse_signals(item_id, text, ml_prob, sorted_urls, worst_url_ratio, sender_pe
         reasons.append(f"{sorted_urls[0]['indicators'][0]} ({target})")
         reasons.extend(sorted_urls[0]["indicators"][1:])
 
-    # Keyword / Intent clues for clear explanation
+    # Context-aware keyword / intent clues (word-boundary safe)
     text_lower = text.lower()
-    if any(k in text_lower for k in ["kyc", "pan", "aadhaar", "account blocked", "suspended", "verify"]):
+    if re.search(r"\b(kyc|pan card|aadhaar|account blocked|account suspended|verify your account)\b", text_lower):
         reasons.append("Credential/KYC verification urgency trigger")
-    elif any(k in text_lower for k in ["otp", "pin", "password", "cvv"]):
+    elif re.search(r"\b(share otp|enter otp|pin|password|cvv)\b", text_lower):
         reasons.append("Sensitive authentication data request")
-    elif any(k in text_lower for k in ["win", "winner", "prize", "lottery", "reward", "free", "claim"]):
+    elif re.search(r"\b(you won|you have won|prize|lottery|jackpot|cash reward|claim your|free gift)\b", text_lower):
         reasons.append("Financial lure / reward bait detected")
-    elif any(k in text_lower for k in ["save the internet settings", "install", "apk", "update"]):
-        reasons.append("Device configuration / download prompt")
+    elif re.search(r"\b(save the internet settings|install apk|download apk)\b", text_lower):
+        reasons.append("Device configuration / APK download prompt")
 
     if ml_prob >= 0.60:
-        reasons.append(f"NLP model flagged social engineering ({int(ml_prob * 100)}% confidence)")
+        reasons.append(f"NLP model flagged promotional/social-engineering tone ({int(ml_prob * 100)}% confidence)")
     if not reasons:
         reasons.append("No actionable malicious indicators found")
 
-    # Preserve exact deterministic order (no random set())
     ordered_reasons = list(dict.fromkeys(reasons))
 
     tier = "HIGH" if final_score >= 70 else ("MEDIUM" if final_score >= 35 else "LOW")
