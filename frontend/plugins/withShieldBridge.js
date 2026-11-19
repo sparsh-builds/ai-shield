@@ -29,7 +29,7 @@ module.exports = function withShieldBridge(config) {
     return config;
   });
 
-  // 3. Auto-generate XML config + ShieldBridgeModule.kt + ShieldBridgePackage.kt
+  // 3. Auto-generate XML config + All 4 Native Kotlin Files
   config = withDangerousMod(config, [
     'android',
     async (config) => {
@@ -52,10 +52,215 @@ module.exports = function withShieldBridge(config) {
         'utf8'
       );
 
-      // 3b. Native Kotlin Bridge Files in com/aishield
+      // 3b. Native Kotlin Files in com/aishield
       const javaDir = path.join(root, 'app', 'src', 'main', 'java', 'com', 'aishield');
       fs.mkdirSync(javaDir, { recursive: true });
 
+      // File 1: ShieldAccessibilityService.kt
+      const accessibilityKt = `package com.aishield
+
+import android.accessibilityservice.AccessibilityService
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+
+data class ScreenContent(val packageName: String, val rawText: String)
+
+class ShieldAccessibilityService : AccessibilityService() {
+
+    companion object {
+        var instance: ShieldAccessibilityService? = null
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Passive mode: reads only when user taps the floating bubble
+    }
+
+    override fun onInterrupt() {}
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (instance == this) instance = null
+    }
+
+    fun captureCurrentAppText(): ScreenContent {
+        val rootNode = rootInActiveWindow ?: return ScreenContent("", "")
+        val pkg = rootNode.packageName?.toString() ?: ""
+        val sb = StringBuilder()
+        traverseNode(rootNode, sb)
+        return ScreenContent(pkg, sb.toString().trim())
+    }
+
+    private fun traverseNode(node: AccessibilityNodeInfo?, sb: StringBuilder) {
+        if (node == null) return
+        node.text?.let {
+            val txt = it.toString().trim()
+            if (txt.isNotEmpty()) sb.append(txt).append("\\n")
+        }
+        for (i in 0 until node.childCount) {
+            traverseNode(node.getChild(i), sb)
+        }
+    }
+}
+`;
+      fs.writeFileSync(path.join(javaDir, 'ShieldAccessibilityService.kt'), accessibilityKt, 'utf8');
+
+      // File 2: FloatingBubbleService.kt (Connected to live Render URL)
+      const bubbleKt = `package com.aishield
+
+import android.app.Service
+import android.content.Intent
+import android.graphics.PixelFormat
+import android.os.Build
+import android.os.IBinder
+import android.view.*
+import android.widget.*
+import kotlinx.coroutines.*
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+
+class FloatingBubbleService : Service() {
+
+    private lateinit var windowManager: WindowManager
+    private lateinit var bubbleView: View
+    private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
+
+    private val BACKEND_URL = "https://ai-shield-backend-6o9v.onrender.com"
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
+        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            layoutType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 100
+            y = 200
+        }
+
+        val button = ImageView(this).apply {
+            setImageResource(android.R.drawable.ic_dialog_info)
+            setBackgroundColor(0xFF05D9E8.toInt())
+            setPadding(24, 24, 24, 24)
+        }
+        bubbleView = button
+
+        button.setOnClickListener {
+            triggerLiveAudit()
+        }
+
+        windowManager.addView(bubbleView, params)
+    }
+
+    private fun triggerLiveAudit() {
+        val accessibility = ShieldAccessibilityService.instance
+        if (accessibility == null) {
+            Toast.makeText(this, "Enable AI Shield Accessibility in Settings!", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        Toast.makeText(this, "Scanning email/SMS...", Toast.LENGTH_SHORT).show()
+
+        val screenData = accessibility.captureCurrentAppText()
+        val textToScan = screenData.rawText
+
+        if (textToScan.isBlank()) {
+            Toast.makeText(this, "No readable content found on screen", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val isGmail = screenData.packageName.contains("gm")
+                val endpoint = if (isGmail) "$BACKEND_URL/predict/email" else "$BACKEND_URL/predict/sms"
+
+                val payload = JSONObject().apply {
+                    put("id", "overlay_scan")
+                    if (isGmail) {
+                        put("subject", "Scraped Screen Content")
+                        put("sender", "")
+                        put("body", textToScan)
+                        put("urls", org.json.JSONArray())
+                    } else {
+                        put("text", textToScan)
+                    }
+                }
+
+                val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    setRequestProperty("Content-Type", "application/json")
+                    doOutput = true
+                    connectTimeout = 45000
+                    readTimeout = 45000
+                    outputStream.use { it.write(payload.toString().toByteArray()) }
+                }
+
+                if (conn.responseCode == 200) {
+                    val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+                    val jsonResponse = JSONObject(responseText)
+                    val riskScore = jsonResponse.getInt("riskScore")
+                    val category = jsonResponse.getString("category")
+                    val reasons = jsonResponse.getJSONArray("reasons")
+
+                    withContext(Dispatchers.Main) {
+                        displayMiniReport(riskScore, category, reasons)
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(applicationContext, "Server error: HTTP \${conn.responseCode}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(applicationContext, "Scan Failed: \${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun displayMiniReport(score: Int, category: String, reasons: org.json.JSONArray) {
+        val firstReason = if (reasons.length() > 0) reasons.getString(0) else "Clean"
+        val alertColor = when {
+            score >= 70 -> "🔴 HIGH RISK"
+            score >= 35 -> "🟡 SUSPICIOUS"
+            else -> "🟢 SAFE"
+        }
+
+        Toast.makeText(
+            this,
+            "$alertColor ($score/100)\\nCategory: $category\\nReason: $firstReason",
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        serviceScope.cancel()
+        if (::bubbleView.isInitialized) windowManager.removeView(bubbleView)
+    }
+}
+`;
+      fs.writeFileSync(path.join(javaDir, 'FloatingBubbleService.kt'), bubbleKt, 'utf8');
+
+      // File 3: ShieldBridgeModule.kt
       const moduleKt = `package com.aishield
 
 import android.content.Intent
@@ -134,6 +339,7 @@ class ShieldBridgeModule(private val reactContext: ReactApplicationContext) :
 `;
       fs.writeFileSync(path.join(javaDir, 'ShieldBridgeModule.kt'), moduleKt, 'utf8');
 
+      // File 4: ShieldBridgePackage.kt
       const packageKt = `package com.aishield
 
 import com.facebook.react.ReactPackage
