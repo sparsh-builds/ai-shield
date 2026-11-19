@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -17,6 +18,8 @@ EMAIL_VERSION = "email-v1.0"
 SMS_VERSION = "sms-v1.0"
 EMAIL_MAX_CHARS = 50000
 SMS_MAX_CHARS = 5000
+MAX_URLS_PER_REQUEST = 50
+MAX_BATCH_SIZE = 50
 
 artifacts: Dict[str, Any] = {}
 
@@ -28,27 +31,34 @@ def load_json(path):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    artifacts["email_vectorizer"] = joblib.load(MODELS_DIR / f"{EMAIL_VERSION}_vectorizer.joblib")
-    artifacts["email_model"] = joblib.load(MODELS_DIR / f"{EMAIL_VERSION}_model.joblib")
-    artifacts["email_meta"] = load_json(MODELS_DIR / f"{EMAIL_VERSION}_meta.json")
+    try:
+        artifacts["email_vectorizer"] = joblib.load(MODELS_DIR / f"{EMAIL_VERSION}_vectorizer.joblib")
+        artifacts["email_model"] = joblib.load(MODELS_DIR / f"{EMAIL_VERSION}_model.joblib")
+        artifacts["email_meta"] = load_json(MODELS_DIR / f"{EMAIL_VERSION}_meta.json")
 
-    artifacts["sms_vectorizer"] = joblib.load(MODELS_DIR / f"{SMS_VERSION}_vectorizer.joblib")
-    artifacts["sms_model"] = joblib.load(MODELS_DIR / f"{SMS_VERSION}_model.joblib")
-    artifacts["sms_meta"] = load_json(MODELS_DIR / f"{SMS_VERSION}_meta.json")
+        artifacts["sms_vectorizer"] = joblib.load(MODELS_DIR / f"{SMS_VERSION}_vectorizer.joblib")
+        artifacts["sms_model"] = joblib.load(MODELS_DIR / f"{SMS_VERSION}_model.joblib")
+        artifacts["sms_meta"] = load_json(MODELS_DIR / f"{SMS_VERSION}_meta.json")
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Missing required ML model artifact: {exc}") from exc
 
+    assert list(artifacts["email_model"].classes_) == [0, 1], "Unexpected Email class mapping"
     assert list(artifacts["sms_model"].classes_) == [0, 1, 2], "Unexpected SMS class mapping"
     yield
     artifacts.clear()
 
 
-app = FastAPI(title="AI Shield ML Engine", version="2.7.0", lifespan=lifespan)
+app = FastAPI(title="AI Shield ML Engine", version="2.8.0", lifespan=lifespan)
+
+raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:8081,http://localhost:19006,http://localhost:3000")
+ALLOWED_ORIGINS = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # ----------------- SENDER SPOOFING ENGINE -----------------
@@ -87,7 +97,7 @@ def inspect_sender_spoofing(sender_raw: str) -> tuple[float, List[str]]:
     return penalty, reasons
 
 
-# ----------------- URL HEURISTIC ENGINE -----------------
+# ----------------- SAFE URL HEURISTIC ENGINE -----------------
 URL_REGEX = re.compile(
     r"(?:https?://)?(?:www\.)?(?:bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|cutt\.ly|ow\.ly|[a-zA-Z0-9-]+\.(?:com|in|xyz|top|click|tk|ml|ga|cf|gq|work|zip|net|org|co\.in))(?:/[^\s<>\"')]*)?",
     re.IGNORECASE,
@@ -96,20 +106,44 @@ KNOWN_SHORTENERS = {"bit.ly", "tinyurl.com", "t.co", "goo.gl", "is.gd", "cutt.ly
 SUSPICIOUS_TLDS = (".xyz", ".top", ".click", ".tk", ".ml", ".ga", ".cf", ".gq", ".work", ".zip", ".surf", ".monster")
 
 
-def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
-    found = set(URL_REGEX.findall(text))
-    if external_urls:
-        found.update(external_urls)
+def _normalize_hostname(raw_host: str) -> str:
+    host = (raw_host or "").strip().lower().rstrip(".")
+    if not host:
+        return ""
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host
 
+
+def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
+    candidates: List[str] = list(URL_REGEX.findall(text))
+    if external_urls:
+        candidates.extend(external_urls[:MAX_URLS_PER_REQUEST])
+
+    seen_domains = set()
     reports = []
-    for raw in found:
+
+    for raw in candidates:
+        if not isinstance(raw, str):
+            continue
         url_str = raw.strip().rstrip(".,;)")
-        if not url_str or "@" in url_str:
+        if not url_str or len(url_str) > 2048 or "@" in url_str:
             continue
 
+        has_explicit_http = url_str.lower().startswith("http://")
         parse_target = url_str if url_str.lower().startswith(("http://", "https://")) else f"http://{url_str}"
-        parsed = urlparse(parse_target)
-        hostname = (parsed.hostname or "").lower()
+
+        try:
+            parsed = urlparse(parse_target)
+        except ValueError:
+            continue
+
+        hostname = _normalize_hostname(parsed.hostname or "")
+        if not hostname or hostname in seen_domains:
+            continue
+        seen_domains.add(hostname)
+
         score = 0
         indicators = []
 
@@ -128,7 +162,7 @@ def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
         if any(hostname.endswith(t) for t in SUSPICIOUS_TLDS):
             score += 30
             indicators.append("High-risk or disposable Top-Level Domain (TLD)")
-        if url_str.lower().startswith("http://"):
+        if has_explicit_http:
             score += 15
             indicators.append("Plaintext HTTP protocol (No TLS encryption)")
 
@@ -148,21 +182,29 @@ def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
 
 
 # ----------------- FUSION FORMULATION -----------------
-def fuse_signals(item_id, text, ml_prob, sorted_urls, worst_url_ratio, sender_penalty, sender_reasons, model_ver):
+def fuse_signals(
+    item_id: str,
+    text: str,
+    ml_prob: float,
+    sorted_urls: List[Dict[str, Any]],
+    worst_url_ratio: float,
+    sender_penalty: float,
+    sender_reasons: List[str],
+    model_ver: str,
+    extra_fields: Optional[Dict[str, Any]] = None,
+):
     composite = (ml_prob * 50.0) + (worst_url_ratio * 30.0) + (sender_penalty * 20.0)
     if (worst_url_ratio >= 0.60 or sender_penalty >= 0.50) and ml_prob >= 0.25:
         composite = max(composite, 82.0)
 
     final_score = int(round(max(0.0, min(100.0, composite))))
 
-    # Specific reasons FIRST so Android Toast displays the exact trigger
     reasons = list(sender_reasons)
     if sorted_urls and sorted_urls[0]["riskScore"] > 0:
         target = sorted_urls[0]["url"]
         reasons.append(f"{sorted_urls[0]['indicators'][0]} ({target})")
         reasons.extend(sorted_urls[0]["indicators"][1:])
 
-    # Context-aware keyword / intent clues (word-boundary safe)
     text_lower = text.lower()
     if re.search(r"\b(kyc|pan card|aadhaar|account blocked|account suspended|verify your account)\b", text_lower):
         reasons.append("Credential/KYC verification urgency trigger")
@@ -183,7 +225,7 @@ def fuse_signals(item_id, text, ml_prob, sorted_urls, worst_url_ratio, sender_pe
     tier = "HIGH" if final_score >= 70 else ("MEDIUM" if final_score >= 35 else "LOW")
     category = "PHISHING" if tier == "HIGH" else ("SUSPICIOUS" if tier == "MEDIUM" else "SAFE")
 
-    return {
+    result: Dict[str, Any] = {
         "id": item_id,
         "riskScore": final_score,
         "riskLevel": tier,
@@ -192,29 +234,34 @@ def fuse_signals(item_id, text, ml_prob, sorted_urls, worst_url_ratio, sender_pe
         "reasons": ordered_reasons,
         "sortedThreatUrls": sorted_urls,
         "urlCount": len(sorted_urls),
-        "modelVersion": model_ver
+        "modelVersion": model_ver,
     }
+    if extra_fields:
+        result.update(extra_fields)
+    return result
 
 
 class EmailRequest(BaseModel):
-    id: str = "msg_001"
-    subject: str = ""
-    sender: str = ""
-    body: str = ""
-    urls: Optional[List[str]] = []
+    id: str = Field(default="msg_001", max_length=128)
+    subject: str = Field(default="", max_length=1000)
+    sender: str = Field(default="", max_length=320)
+    body: str = Field(default="", max_length=EMAIL_MAX_CHARS)
+    urls: List[str] = Field(default_factory=list, max_length=MAX_URLS_PER_REQUEST)
 
 
 class SMSRequest(BaseModel):
-    id: str = "sms_001"
-    text: str = Field(min_length=1)
+    id: str = Field(default="sms_001", max_length=128)
+    text: str = Field(min_length=1, max_length=SMS_MAX_CHARS)
 
 
 class BatchEmailRequest(BaseModel):
-    emails: List[EmailRequest]
+    emails: List[EmailRequest] = Field(min_length=1, max_length=MAX_BATCH_SIZE)
 
 
 @app.get("/health")
 def health():
+    if "email_meta" not in artifacts or "sms_meta" not in artifacts:
+        raise HTTPException(status_code=503, detail="Models not loaded")
     return {
         "status": "OPERATIONAL",
         "models": [artifacts["email_meta"]["model_version"], artifacts["sms_meta"]["model_version"]],
@@ -223,6 +270,9 @@ def health():
 
 @app.post("/predict/email")
 def predict_email(req: EmailRequest):
+    if "email_vectorizer" not in artifacts or "email_model" not in artifacts:
+        raise HTTPException(status_code=503, detail="Email model unavailable")
+
     raw_full = f"{req.subject} {req.body}".strip()
     cleaned = clean_text(raw_full)[:EMAIL_MAX_CHARS]
     if not cleaned:
@@ -247,14 +297,23 @@ def predict_email(req: EmailRequest):
 
 @app.post("/predict/sms")
 def predict_sms(req: SMSRequest):
+    if "sms_vectorizer" not in artifacts or "sms_model" not in artifacts:
+        raise HTTPException(status_code=503, detail="SMS model unavailable")
+
     cleaned = clean_text(req.text)[:SMS_MAX_CHARS]
     if not cleaned:
         raise HTTPException(status_code=422, detail="SMS empty")
 
     vec = artifacts["sms_vectorizer"].transform([cleaned])
     proba = artifacts["sms_model"].predict_proba(vec)[0]
-    scam_prob, _ = decide(proba)
+    scam_prob, sms_sub_category = decide(proba)
     sorted_urls, worst_ratio = analyze_urls(req.text)
+
+    extra = {
+        "smsClassification": sms_sub_category,
+        "spamProbability": round(float(proba[1]), 4),
+        "smishingProbability": round(float(proba[2]), 4),
+    }
 
     return fuse_signals(
         req.id,
@@ -265,6 +324,7 @@ def predict_sms(req: SMSRequest):
         0.0,
         [],
         artifacts["sms_meta"]["model_version"],
+        extra_fields=extra,
     )
 
 
