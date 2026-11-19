@@ -48,17 +48,17 @@ async def lifespan(app: FastAPI):
     artifacts.clear()
 
 
-app = FastAPI(title="AI Shield ML Engine", version="3.0.0", lifespan=lifespan)
+app = FastAPI(title="AI Shield ML Engine", version="3.0.1", lifespan=lifespan)
 
-raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:8081,http://localhost:19006,http://localhost:3000")
-ALLOWED_ORIGINS = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+raw_origins = os.getenv("ALLOWED_ORIGINS", "*").strip()
+ALLOWED_ORIGINS = ["*"] if raw_origins == "*" else [o.strip() for o in raw_origins.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ----------------- SENDER SPOOFING ENGINE -----------------
@@ -222,16 +222,13 @@ def fuse_signals(
     text_lower = text.lower()
     rule_boost, rule_reasons = analyze_intent_rules(text_lower)
 
-    # Weighted hybrid fusion
     composite = (ml_prob * 45.0) + (worst_url_ratio * 35.0) + (sender_penalty * 20.0) + (rule_boost * 40.0)
 
-    # Hard escalation rules when strong technical indicators combine
     if (worst_url_ratio >= 0.55 or sender_penalty >= 0.50) and (ml_prob >= 0.25 or rule_boost >= 0.25):
         composite = max(composite, 84.0)
     elif worst_url_ratio >= 0.40 and rule_boost >= 0.25:
         composite = max(composite, 72.0)
 
-    # Benign context dampener: college/hackathon/official notices without bad URLs or spoofing
     is_benign_event = bool(re.search(r"\b(hackathon|workshop|techfest|grand finale|problem statement|registration)\b", text_lower))
     if is_benign_event and worst_url_ratio == 0.0 and sender_penalty == 0.0 and rule_boost == 0.0:
         composite = min(composite, 24.0)
@@ -241,7 +238,6 @@ def fuse_signals(
     tier = "HIGH" if final_score >= 70 else ("MEDIUM" if final_score >= 35 else "LOW")
     category = "PHISHING" if tier == "HIGH" else ("SUSPICIOUS" if tier == "MEDIUM" else "SAFE")
 
-    # Build reasons strictly consistent with final tier
     reasons: List[str] = []
     if tier == "LOW":
         reasons.append("No malicious URLs, spoofing, or credential traps detected")
@@ -276,15 +272,15 @@ def fuse_signals(
 
 
 class EmailRequest(BaseModel):
-    id: str = Field(default="msg_001", max_length=128)
-    subject: str = Field(default="", max_length=1000)
-    sender: str = Field(default="", max_length=320)
-    body: str = Field(default="", max_length=EMAIL_MAX_CHARS)
-    urls: List[str] = Field(default_factory=list, max_length=MAX_URLS_PER_REQUEST)
+    id: Optional[str] = Field(default="msg_001", max_length=128)
+    subject: Optional[str] = Field(default="", max_length=2000)
+    sender: Optional[str] = Field(default="", max_length=500)
+    body: Optional[str] = Field(default="", max_length=EMAIL_MAX_CHARS)
+    urls: Optional[List[str]] = Field(default_factory=list, max_length=MAX_URLS_PER_REQUEST)
 
 
 class SMSRequest(BaseModel):
-    id: str = Field(default="sms_001", max_length=128)
+    id: Optional[str] = Field(default="sms_001", max_length=128)
     text: str = Field(min_length=1, max_length=SMS_MAX_CHARS)
 
 
@@ -307,18 +303,18 @@ def predict_email(req: EmailRequest):
     if "email_vectorizer" not in artifacts or "email_model" not in artifacts:
         raise HTTPException(status_code=503, detail="Email model unavailable")
 
-    raw_full = f"{req.subject} {req.body}".strip()
+    raw_full = f"{req.subject or ''} {req.body or ''}".strip()
     cleaned = clean_text(raw_full)[:EMAIL_MAX_CHARS]
     if not cleaned:
         raise HTTPException(status_code=422, detail="Text empty")
 
     vec = artifacts["email_vectorizer"].transform([cleaned])
     ml_prob = float(artifacts["email_model"].predict_proba(vec)[0, 1])
-    sorted_urls, worst_ratio = analyze_urls(raw_full, req.urls)
-    s_pen, s_reasons = inspect_sender_spoofing(req.sender)
+    sorted_urls, worst_ratio = analyze_urls(raw_full, req.urls or [])
+    s_pen, s_reasons = inspect_sender_spoofing(req.sender or "")
 
     return fuse_signals(
-        req.id,
+        req.id or "msg_001",
         raw_full,
         ml_prob,
         sorted_urls,
@@ -350,7 +346,7 @@ def predict_sms(req: SMSRequest):
     }
 
     return fuse_signals(
-        req.id,
+        req.id or "sms_001",
         req.text,
         scam_prob,
         sorted_urls,
