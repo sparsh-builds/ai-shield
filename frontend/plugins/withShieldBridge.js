@@ -56,14 +56,14 @@ module.exports = function withShieldBridge(config) {
       const javaDir = path.join(root, 'app', 'src', 'main', 'java', 'com', 'aishield');
       fs.mkdirSync(javaDir, { recursive: true });
 
-      // File 1: ShieldAccessibilityService.kt
+      // File 1: ShieldAccessibilityService.kt (Filtered & Deterministic Text Scraper)
       const accessibilityKt = `package com.aishield
 
 import android.accessibilityservice.AccessibilityService
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
-data class ScreenContent(val packageName: String, val rawText: String)
+data class ScreenContent(val packageName: String, val rawText: String, val lines: List<String>)
 
 class ShieldAccessibilityService : AccessibilityService() {
 
@@ -86,28 +86,46 @@ class ShieldAccessibilityService : AccessibilityService() {
     }
 
     fun captureCurrentAppText(): ScreenContent {
-        val rootNode = rootInActiveWindow ?: return ScreenContent("", "")
+        val rootNode = rootInActiveWindow ?: return ScreenContent("", "", emptyList())
         val pkg = rootNode.packageName?.toString() ?: ""
-        val sb = StringBuilder()
-        traverseNode(rootNode, sb)
-        return ScreenContent(pkg, sb.toString().trim())
+
+        // Ignore system UI or AI Shield itself
+        if (pkg == "com.android.systemui" || pkg == "com.aishield") {
+            return ScreenContent(pkg, "", emptyList())
+        }
+
+        val collected = LinkedHashSet<String>()
+        traverseNode(rootNode, collected)
+
+        val cleanLines = collected.toList()
+        val combined = cleanLines.joinToString("\\n").trim()
+        return ScreenContent(pkg, combined, cleanLines)
     }
 
-    private fun traverseNode(node: AccessibilityNodeInfo?, sb: StringBuilder) {
+    private fun traverseNode(node: AccessibilityNodeInfo?, collected: LinkedHashSet<String>) {
         if (node == null) return
-        node.text?.let {
-            val txt = it.toString().trim()
-            if (txt.isNotEmpty()) sb.append(txt).append("\\n")
+
+        val raw = node.text?.toString()?.trim() ?: node.contentDescription?.toString()?.trim()
+        if (!raw.isNullOrEmpty()) {
+            val isUrlOrEmail = raw.contains("http://", true) || raw.contains("https://", true) || raw.contains("@")
+            val isClock = raw.matches(Regex("^\\\\d{1,2}:\\\\d{2}(\\\\s?[APMapm]{2})?$"))
+            val isPercent = raw.matches(Regex("^\\\\d{1,3}%$"))
+
+            // Keep meaningful sentences (>12 chars) or any URL/email; drop clocks & tiny nav labels
+            if (!isClock && !isPercent && (raw.length > 12 || isUrlOrEmail)) {
+                collected.add(raw)
+            }
         }
+
         for (i in 0 until node.childCount) {
-            traverseNode(node.getChild(i), sb)
+            traverseNode(node.getChild(i), collected)
         }
     }
 }
 `;
       fs.writeFileSync(path.join(javaDir, 'ShieldAccessibilityService.kt'), accessibilityKt, 'utf8');
 
-      // File 2: FloatingBubbleService.kt
+      // File 2: FloatingBubbleService.kt (Extracts Real Subject, Sender & URLs)
       const bubbleKt = `package com.aishield
 
 import android.app.Service
@@ -172,7 +190,6 @@ class FloatingBubbleService : Service() {
         }
         bubbleView = button
 
-        // Allow dragging + tap to scan
         var initialX = 0
         var initialY = 0
         var initialTouchX = 0f
@@ -208,6 +225,18 @@ class FloatingBubbleService : Service() {
         windowManager.addView(bubbleView, params)
     }
 
+    private fun extractUrls(text: String): JSONArray {
+        val urlRegex = Regex("https?://[^\\\\s\\"'>)]+", RegexOption.IGNORE_CASE)
+        val urls = JSONArray()
+        urlRegex.findAll(text).map { it.value }.distinct().forEach { urls.put(it) }
+        return urls
+    }
+
+    private fun extractSender(text: String): String {
+        val emailRegex = Regex("[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\\\.[a-zA-Z]{2,}")
+        return emailRegex.find(text)?.value ?: ""
+    }
+
     private fun triggerLiveAudit() {
         val accessibility = ShieldAccessibilityService.instance
         if (accessibility == null) {
@@ -215,28 +244,33 @@ class FloatingBubbleService : Service() {
             return
         }
 
-        Toast.makeText(this, "Scanning email/SMS...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Scanning screen...", Toast.LENGTH_SHORT).show()
 
         val screenData = accessibility.captureCurrentAppText()
         val textToScan = screenData.rawText
 
         if (textToScan.isBlank()) {
-            Toast.makeText(this, "No readable content found on screen", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Open an Email or SMS first, then tap bubble", Toast.LENGTH_SHORT).show()
             return
         }
 
         serviceScope.launch(Dispatchers.IO) {
             try {
-                val isGmail = screenData.packageName.contains("gm")
+                val isGmail = screenData.packageName.contains("gm", ignoreCase = true) ||
+                              screenData.packageName.contains("mail", ignoreCase = true)
                 val endpoint = if (isGmail) "$BACKEND_URL/predict/email" else "$BACKEND_URL/predict/sms"
+
+                val extractedUrls = extractUrls(textToScan)
+                val extractedSender = extractSender(textToScan)
+                val extractedSubject = screenData.lines.firstOrNull { !it.contains("@") && !it.startsWith("http") } ?: "On-Screen Email"
 
                 val payload = JSONObject().apply {
                     put("id", "overlay_scan")
                     if (isGmail) {
-                        put("subject", "Scraped Screen Content")
-                        put("sender", "")
+                        put("subject", extractedSubject)
+                        put("sender", extractedSender)
                         put("body", textToScan)
-                        put("urls", JSONArray())
+                        put("urls", extractedUrls)
                     } else {
                         put("text", textToScan)
                     }
@@ -275,8 +309,8 @@ class FloatingBubbleService : Service() {
     }
 
     private fun displayMiniReport(score: Int, category: String, reasons: JSONArray) {
-        val firstReason = if (reasons.length() > 0) reasons.getString(0) else "Clean"
-        val alertColor = when {
+        val firstReason = if (reasons.length() > 0) reasons.getString(0) else "No threats detected"
+        val alertBadge = when {
             score >= 70 -> "HIGH RISK"
             score >= 35 -> "SUSPICIOUS"
             else -> "SAFE"
@@ -284,7 +318,7 @@ class FloatingBubbleService : Service() {
 
         Toast.makeText(
             this,
-            "$alertColor ($score/100)\\nCategory: $category\\nReason: $firstReason",
+            "$alertBadge ($score/100)\\nCategory: $category\\nReason: $firstReason",
             Toast.LENGTH_LONG
         ).show()
     }
@@ -298,7 +332,7 @@ class FloatingBubbleService : Service() {
 `;
       fs.writeFileSync(path.join(javaDir, 'FloatingBubbleService.kt'), bubbleKt, 'utf8');
 
-      // File 3: ShieldBridgeModule.kt (Exact method names matching App.tsx)
+      // File 3: ShieldBridgeModule.kt
       const moduleKt = `package com.aishield
 
 import android.content.Intent
