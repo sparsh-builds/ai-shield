@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
     artifacts.clear()
 
 
-app = FastAPI(title="AI Shield ML Engine", version="2.8.0", lifespan=lifespan)
+app = FastAPI(title="AI Shield ML Engine", version="3.0.0", lifespan=lifespan)
 
 raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:8081,http://localhost:19006,http://localhost:3000")
 ALLOWED_ORIGINS = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
@@ -72,6 +72,8 @@ PROTECTED_BRANDS = {
     "hdfc": ["hdfcbank.com"],
     "sbi": ["sbi.co.in"],
     "icici": ["icicibank.com"],
+    "paytm": ["paytm.com"],
+    "phonepe": ["phonepe.com"],
 }
 
 
@@ -86,12 +88,12 @@ def inspect_sender_spoofing(sender_raw: str) -> tuple[float, List[str]]:
     reasons = []
     penalty = 0.0
     for brand, legit_domains in PROTECTED_BRANDS.items():
-        if brand in sender_lower:
+        if brand in sender_lower and actual_domain:
             is_valid = any(actual_domain == d or actual_domain.endswith("." + d) for d in legit_domains)
             if not is_valid:
-                penalty += 0.50
+                penalty += 0.60
                 reasons.append(
-                    f"Sender Spoofing Alert: Claiming identity '{brand.capitalize()}' from unverified domain '{actual_domain}'"
+                    f"Brand Spoofing: '{brand.capitalize()}' claimed from unverified domain '{actual_domain}'"
                 )
                 break
     return penalty, reasons
@@ -148,23 +150,23 @@ def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
         indicators = []
 
         if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", hostname):
-            score += 45
-            indicators.append("IP-based direct link (No verified DNS)")
+            score += 55
+            indicators.append("Direct IP address URL (No verified DNS)")
         if hostname in KNOWN_SHORTENERS:
-            score += 35
-            indicators.append("Obfuscated URL shortener hiding target endpoint")
+            score += 40
+            indicators.append("Obfuscated URL shortener hiding destination")
         if hostname.count(".") >= 3:
             score += 25
             indicators.append(f"Excessive subdomain nesting ({hostname.count('.')} dots)")
         if "xn--" in hostname:
-            score += 40
+            score += 45
             indicators.append("Punycode homograph domain spoofing")
         if any(hostname.endswith(t) for t in SUSPICIOUS_TLDS):
-            score += 30
-            indicators.append("High-risk or disposable Top-Level Domain (TLD)")
+            score += 35
+            indicators.append("High-risk / disposable Top-Level Domain (TLD)")
         if has_explicit_http:
             score += 15
-            indicators.append("Plaintext HTTP protocol (No TLS encryption)")
+            indicators.append("Unencrypted HTTP link (No TLS)")
 
         norm_score = min(100, score)
         level = "CRITICAL" if norm_score >= 70 else ("WARNING" if norm_score >= 35 else "CLEAN")
@@ -173,7 +175,7 @@ def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
             "hostname": hostname,
             "riskScore": norm_score,
             "threatLevel": level,
-            "indicators": indicators or ["No structural anomalies found"]
+            "indicators": indicators or ["Verified standard domain structure"]
         })
 
     reports.sort(key=lambda x: x["riskScore"], reverse=True)
@@ -181,7 +183,31 @@ def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
     return reports, worst_ratio
 
 
-# ----------------- FUSION FORMULATION -----------------
+# ----------------- INTENT & SOCIAL ENGINEERING RULES -----------------
+def analyze_intent_rules(text_lower: str) -> tuple[float, List[str]]:
+    boost = 0.0
+    triggers = []
+
+    if re.search(r"\b(kyc|pan card|aadhaar|account blocked|account suspended|verify your account|reactivate)\b", text_lower):
+        boost += 0.35
+        triggers.append("Account/KYC suspension urgency trigger")
+
+    if re.search(r"\b(share otp|enter otp|send otp|pin|password|cvv|card number)\b", text_lower):
+        boost += 0.40
+        triggers.append("Sensitive credential / OTP harvesting attempt")
+
+    if re.search(r"\b(you have won|you won|claim your prize|lottery winner|jackpot|cash reward|claim free gift)\b", text_lower):
+        boost += 0.30
+        triggers.append("Unsolicited financial reward / lottery lure")
+
+    if re.search(r"\b(save the internet settings|install apk|download apk|allow unknown sources)\b", text_lower):
+        boost += 0.35
+        triggers.append("Malicious configuration / APK sideload prompt")
+
+    return min(0.60, boost), triggers
+
+
+# ----------------- FUSION FORMULATION (ZERO CONTRADICTION) -----------------
 def fuse_signals(
     item_id: str,
     text: str,
@@ -193,37 +219,45 @@ def fuse_signals(
     model_ver: str,
     extra_fields: Optional[Dict[str, Any]] = None,
 ):
-    composite = (ml_prob * 50.0) + (worst_url_ratio * 30.0) + (sender_penalty * 20.0)
-    if (worst_url_ratio >= 0.60 or sender_penalty >= 0.50) and ml_prob >= 0.25:
-        composite = max(composite, 82.0)
-
-    final_score = int(round(max(0.0, min(100.0, composite))))
-
-    reasons = list(sender_reasons)
-    if sorted_urls and sorted_urls[0]["riskScore"] > 0:
-        target = sorted_urls[0]["url"]
-        reasons.append(f"{sorted_urls[0]['indicators'][0]} ({target})")
-        reasons.extend(sorted_urls[0]["indicators"][1:])
-
     text_lower = text.lower()
-    if re.search(r"\b(kyc|pan card|aadhaar|account blocked|account suspended|verify your account)\b", text_lower):
-        reasons.append("Credential/KYC verification urgency trigger")
-    elif re.search(r"\b(share otp|enter otp|pin|password|cvv)\b", text_lower):
-        reasons.append("Sensitive authentication data request")
-    elif re.search(r"\b(you won|you have won|prize|lottery|jackpot|cash reward|claim your|free gift)\b", text_lower):
-        reasons.append("Financial lure / reward bait detected")
-    elif re.search(r"\b(save the internet settings|install apk|download apk)\b", text_lower):
-        reasons.append("Device configuration / APK download prompt")
+    rule_boost, rule_reasons = analyze_intent_rules(text_lower)
 
-    if ml_prob >= 0.60:
-        reasons.append(f"NLP model flagged promotional/social-engineering tone ({int(ml_prob * 100)}% confidence)")
-    if not reasons:
-        reasons.append("No actionable malicious indicators found")
+    # Weighted hybrid fusion
+    composite = (ml_prob * 45.0) + (worst_url_ratio * 35.0) + (sender_penalty * 20.0) + (rule_boost * 40.0)
 
-    ordered_reasons = list(dict.fromkeys(reasons))
+    # Hard escalation rules when strong technical indicators combine
+    if (worst_url_ratio >= 0.55 or sender_penalty >= 0.50) and (ml_prob >= 0.25 or rule_boost >= 0.25):
+        composite = max(composite, 84.0)
+    elif worst_url_ratio >= 0.40 and rule_boost >= 0.25:
+        composite = max(composite, 72.0)
+
+    # Benign context dampener: college/hackathon/official notices without bad URLs or spoofing
+    is_benign_event = bool(re.search(r"\b(hackathon|workshop|techfest|grand finale|problem statement|registration)\b", text_lower))
+    if is_benign_event and worst_url_ratio == 0.0 and sender_penalty == 0.0 and rule_boost == 0.0:
+        composite = min(composite, 24.0)
+
+    final_score = int(round(max(1.0, min(99.0, composite))))
 
     tier = "HIGH" if final_score >= 70 else ("MEDIUM" if final_score >= 35 else "LOW")
     category = "PHISHING" if tier == "HIGH" else ("SUSPICIOUS" if tier == "MEDIUM" else "SAFE")
+
+    # Build reasons strictly consistent with final tier
+    reasons: List[str] = []
+    if tier == "LOW":
+        reasons.append("No malicious URLs, spoofing, or credential traps detected")
+    else:
+        reasons.extend(sender_reasons)
+        if sorted_urls and sorted_urls[0]["riskScore"] > 0:
+            target = sorted_urls[0]["url"]
+            reasons.append(f"{sorted_urls[0]['indicators'][0]} ({target})")
+            reasons.extend(sorted_urls[0]["indicators"][1:])
+        reasons.extend(rule_reasons)
+        if ml_prob >= 0.65:
+            reasons.append(f"NLP classifier detected social-engineering patterns ({int(ml_prob * 100)}% confidence)")
+        if not reasons:
+            reasons.append("Elevated linguistic anomaly score — verify sender before clicking links")
+
+    ordered_reasons = list(dict.fromkeys(reasons))
 
     result: Dict[str, Any] = {
         "id": item_id,

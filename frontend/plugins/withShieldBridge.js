@@ -56,7 +56,7 @@ module.exports = function withShieldBridge(config) {
       const javaDir = path.join(root, 'app', 'src', 'main', 'java', 'com', 'aishield');
       fs.mkdirSync(javaDir, { recursive: true });
 
-      // File 1: ShieldAccessibilityService.kt (With Multi-Window Fallback for Gmail WebView)
+      // File 1: ShieldAccessibilityService.kt
       const accessibilityKt = `package com.aishield
 
 import android.accessibilityservice.AccessibilityService
@@ -133,15 +133,19 @@ class ShieldAccessibilityService : AccessibilityService() {
 `;
       fs.writeFileSync(path.join(javaDir, 'ShieldAccessibilityService.kt'), accessibilityKt, 'utf8');
 
-      // File 2: FloatingBubbleService.kt
+      // File 2: FloatingBubbleService.kt (With Native Audio Alerts + Vibration)
       const bubbleKt = `package com.aishield
 
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.IBinder
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -255,6 +259,7 @@ class FloatingBubbleService : Service() {
             return
         }
 
+        playTone(ToneGenerator.TONE_PROP_BEEP, 90)
         Toast.makeText(this, "Scanning screen...", Toast.LENGTH_SHORT).show()
 
         val screenData = accessibility.captureCurrentAppText()
@@ -319,16 +324,48 @@ class FloatingBubbleService : Service() {
         }
     }
 
+    private fun playTone(toneType: Int, durationMs: Int) {
+        try {
+            val tg = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 95)
+            tg.startTone(toneType, durationMs)
+            android.os.Handler(mainLooper).postDelayed({ tg.release() }, (durationMs + 100).toLong())
+        } catch (_: Exception) {}
+    }
+
+    @Suppress("DEPRECATION")
+    private fun triggerHaptic(durationMs: Long) {
+        try {
+            val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator?.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                vibrator?.vibrate(durationMs)
+            }
+        } catch (_: Exception) {}
+    }
+
     private fun displayMiniReport(score: Int, category: String, reasons: JSONArray) {
         val topReasons = mutableListOf<String>()
         for (i in 0 until minOf(reasons.length(), 2)) {
             topReasons.add("• " + reasons.getString(i))
         }
         val reasonText = if (topReasons.isNotEmpty()) topReasons.joinToString("\\n") else "• Clean"
+
         val alertBadge = when {
-            score >= 70 -> "HIGH RISK"
-            score >= 35 -> "SUSPICIOUS"
-            else -> "SAFE"
+            score >= 70 -> {
+                playTone(ToneGenerator.TONE_CDMA_EMERGENCY_RINGBACK, 450)
+                triggerHaptic(400)
+                "HIGH RISK"
+            }
+            score >= 35 -> {
+                playTone(ToneGenerator.TONE_PROP_BEEP2, 250)
+                triggerHaptic(180)
+                "SUSPICIOUS"
+            }
+            else -> {
+                playTone(ToneGenerator.TONE_PROP_ACK, 180)
+                "SAFE"
+            }
         }
 
         Toast.makeText(
@@ -448,6 +485,7 @@ class ShieldBridgePackage : ReactPackage {
       'android.permission.SYSTEM_ALERT_WINDOW',
       'android.permission.FOREGROUND_SERVICE',
       'android.permission.INTERNET',
+      'android.permission.VIBRATE',
     ];
     perms.forEach((perm) => {
       if (!manifest['uses-permission'].some((p) => p.$['android:name'] === perm)) {
