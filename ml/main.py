@@ -99,7 +99,7 @@ def inspect_sender_spoofing(sender_raw: str) -> tuple[float, List[str]]:
 
 # ----------------- SAFE URL HEURISTIC ENGINE -----------------
 URL_REGEX = re.compile(
-    r"(?:https?://)?(?:www\.)?(?:bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|cutt\.ly|ow\.ly|[a-zA-Z0-9-]+\.(?:com|in|xyz|top|click|tk|ml|ga|cf|gq|work|zip|net|org|co\.in))(?:/[^\s<>\"')]*)?",
+    r"(?:https?://)?(?:www\.)?(?:\d{1,3}(?:\.\d{1,3}){3}|bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|cutt\.ly|ow\.ly|[a-zA-Z0-9-]+\.(?:com|in|xyz|top|click|tk|ml|ga|cf|gq|work|zip|net|org|co\.in))(?:/[^\s<>\"')]*)?",
     re.IGNORECASE,
 )
 KNOWN_SHORTENERS = {"bit.ly", "tinyurl.com", "t.co", "goo.gl", "is.gd", "cutt.ly", "ow.ly"}
