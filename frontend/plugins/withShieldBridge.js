@@ -117,6 +117,7 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.ImageView
@@ -161,18 +162,47 @@ class FloatingBubbleService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = 100
-            y = 200
+            y = 250
         }
 
         val button = ImageView(this).apply {
             setImageResource(android.R.drawable.ic_dialog_info)
             setBackgroundColor(0xFF05D9E8.toInt())
-            setPadding(24, 24, 24, 24)
+            setPadding(28, 28, 28, 28)
         }
         bubbleView = button
 
-        button.setOnClickListener {
-            triggerLiveAudit()
+        // Allow dragging + tap to scan
+        var initialX = 0
+        var initialY = 0
+        var initialTouchX = 0f
+        var initialTouchY = 0f
+
+        button.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = params.x
+                    initialY = params.y
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = initialX + (event.rawX - initialTouchX).toInt()
+                    params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    windowManager.updateViewLayout(bubbleView, params)
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    val dx = Math.abs(event.rawX - initialTouchX)
+                    val dy = Math.abs(event.rawY - initialTouchY)
+                    if (dx < 15 && dy < 15) {
+                        triggerLiveAudit()
+                    }
+                    true
+                }
+                else -> false
+            }
         }
 
         windowManager.addView(bubbleView, params)
@@ -268,7 +298,7 @@ class FloatingBubbleService : Service() {
 `;
       fs.writeFileSync(path.join(javaDir, 'FloatingBubbleService.kt'), bubbleKt, 'utf8');
 
-      // File 3: ShieldBridgeModule.kt
+      // File 3: ShieldBridgeModule.kt (Exact method names matching App.tsx)
       const moduleKt = `package com.aishield
 
 import android.content.Intent
@@ -286,70 +316,50 @@ class ShieldBridgeModule(private val reactContext: ReactApplicationContext) :
     override fun getName(): String = "ShieldBridge"
 
     @ReactMethod
-    fun openAccessibilitySettings(promise: Promise) {
+    fun checkOverlayPermission(promise: Promise) {
         try {
-            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+            val canDraw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Settings.canDrawOverlays(reactContext)
+            } else {
+                true
+            }
+            promise.resolve(canDraw)
+        } catch (e: Exception) {
+            promise.reject("ERR_CHECK_OVERLAY", e)
+        }
+    }
+
+    @ReactMethod
+    fun requestOverlayPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:" + reactContext.packageName)
+            ).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             reactContext.startActivity(intent)
-            promise.resolve(true)
-        } catch (e: Exception) {
-            promise.reject("ERR_ACCESSIBILITY", e)
         }
     }
 
     @ReactMethod
-    fun openOverlaySettings(promise: Promise) {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(reactContext)) {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + reactContext.packageName)
-                ).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                reactContext.startActivity(intent)
-            } else {
-                val intent = Intent(reactContext, FloatingBubbleService::class.java)
-                reactContext.startService(intent)
-            }
-            promise.resolve(true)
-        } catch (e: Exception) {
-            promise.reject("ERR_OVERLAY", e)
-        }
+    fun startFloatingBubble() {
+        val intent = Intent(reactContext, FloatingBubbleService::class.java)
+        reactContext.startService(intent)
     }
 
     @ReactMethod
-    fun startBubbleService(promise: Promise) {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(reactContext)) {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + reactContext.packageName)
-                ).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                reactContext.startActivity(intent)
-                promise.resolve(false)
-                return
-            }
-            val intent = Intent(reactContext, FloatingBubbleService::class.java)
-            reactContext.startService(intent)
-            promise.resolve(true)
-        } catch (e: Exception) {
-            promise.reject("ERR_BUBBLE", e)
-        }
+    fun stopFloatingBubble() {
+        val intent = Intent(reactContext, FloatingBubbleService::class.java)
+        reactContext.stopService(intent)
     }
 
     @ReactMethod
-    fun stopBubbleService(promise: Promise) {
-        try {
-            val intent = Intent(reactContext, FloatingBubbleService::class.java)
-            reactContext.stopService(intent)
-            promise.resolve(true)
-        } catch (e: Exception) {
-            promise.reject("ERR_STOP_BUBBLE", e)
+    fun openAccessibilitySettings() {
+        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
+        reactContext.startActivity(intent)
     }
 }
 `;
