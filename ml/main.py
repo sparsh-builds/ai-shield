@@ -20,9 +20,11 @@ SMS_MAX_CHARS = 5000
 
 artifacts: Dict[str, Any] = {}
 
+
 def load_json(path):
     with open(path) as f:
         return json.load(f)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,12 +35,13 @@ async def lifespan(app: FastAPI):
     artifacts["sms_vectorizer"] = joblib.load(MODELS_DIR / f"{SMS_VERSION}_vectorizer.joblib")
     artifacts["sms_model"] = joblib.load(MODELS_DIR / f"{SMS_VERSION}_model.joblib")
     artifacts["sms_meta"] = load_json(MODELS_DIR / f"{SMS_VERSION}_meta.json")
-    
+
     assert list(artifacts["sms_model"].classes_) == [0, 1, 2], "Unexpected SMS class mapping"
     yield
     artifacts.clear()
 
-app = FastAPI(title="AI Shield ML Engine", version="2.5.0", lifespan=lifespan)
+
+app = FastAPI(title="AI Shield ML Engine", version="2.6.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,6 +64,7 @@ PROTECTED_BRANDS = {
     "icici": ["icicibank.com"],
 }
 
+
 def inspect_sender_spoofing(sender_raw: str) -> tuple[float, List[str]]:
     sender_lower = (sender_raw or "").lower().strip()
     if not sender_lower:
@@ -76,14 +80,21 @@ def inspect_sender_spoofing(sender_raw: str) -> tuple[float, List[str]]:
             is_valid = any(actual_domain == d or actual_domain.endswith("." + d) for d in legit_domains)
             if not is_valid:
                 penalty += 0.50
-                reasons.append(f"Sender Spoofing Alert: Claiming identity '{brand.capitalize()}' from unverified domain '{actual_domain}'")
+                reasons.append(
+                    f"Sender Spoofing Alert: Claiming identity '{brand.capitalize()}' from unverified domain '{actual_domain}'"
+                )
                 break
     return penalty, reasons
 
+
 # ----------------- URL HEURISTIC ENGINE -----------------
-URL_REGEX = re.compile(r"https?://[^\s<>\"')]+", re.IGNORECASE)
+URL_REGEX = re.compile(
+    r"(?:https?://)?(?:www\.)?(?:bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|cutt\.ly|ow\.ly|[a-zA-Z0-9-]+\.(?:com|in|xyz|top|click|tk|ml|ga|cf|gq|work|zip|net|org|co\.in))(?:/[^\s<>\"')]*)?",
+    re.IGNORECASE,
+)
 KNOWN_SHORTENERS = {"bit.ly", "tinyurl.com", "t.co", "goo.gl", "is.gd", "cutt.ly", "ow.ly"}
 SUSPICIOUS_TLDS = (".xyz", ".top", ".click", ".tk", ".ml", ".ga", ".cf", ".gq", ".work", ".zip", ".surf", ".monster")
+
 
 def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
     found = set(URL_REGEX.findall(text))
@@ -92,8 +103,12 @@ def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
 
     reports = []
     for raw in found:
-        url_str = raw.strip()
-        parsed = urlparse(url_str)
+        url_str = raw.strip().rstrip(".,;)")
+        if not url_str or "@" in url_str:
+            continue
+
+        parse_target = url_str if url_str.lower().startswith(("http://", "https://")) else f"http://{url_str}"
+        parsed = urlparse(parse_target)
         hostname = (parsed.hostname or "").lower()
         score = 0
         indicators = []
@@ -113,7 +128,7 @@ def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
         if any(hostname.endswith(t) for t in SUSPICIOUS_TLDS):
             score += 30
             indicators.append("High-risk or disposable Top-Level Domain (TLD)")
-        if parsed.scheme == "http":
+        if url_str.lower().startswith("http://"):
             score += 15
             indicators.append("Plaintext HTTP protocol (No TLS encryption)")
 
@@ -131,6 +146,7 @@ def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
     worst_ratio = (reports[0]["riskScore"] / 100.0) if reports else 0.0
     return reports, worst_ratio
 
+
 # ----------------- FUSION FORMULATION -----------------
 def fuse_signals(item_id, text, ml_prob, sorted_urls, worst_url_ratio, sender_penalty, sender_reasons, model_ver):
     composite = (ml_prob * 50.0) + (worst_url_ratio * 30.0) + (sender_penalty * 20.0)
@@ -138,13 +154,32 @@ def fuse_signals(item_id, text, ml_prob, sorted_urls, worst_url_ratio, sender_pe
         composite = max(composite, 82.0)
 
     final_score = int(round(max(0.0, min(100.0, composite))))
+
+    # Specific reasons FIRST so Android Toast displays the exact trigger
     reasons = list(sender_reasons)
     if sorted_urls and sorted_urls[0]["riskScore"] > 0:
-        reasons.extend(sorted_urls[0]["indicators"])
+        target = sorted_urls[0]["url"]
+        reasons.append(f"{sorted_urls[0]['indicators'][0]} ({target})")
+        reasons.extend(sorted_urls[0]["indicators"][1:])
+
+    # Keyword / Intent clues for clear explanation
+    text_lower = text.lower()
+    if any(k in text_lower for k in ["kyc", "pan", "aadhaar", "account blocked", "suspended", "verify"]):
+        reasons.append("Credential/KYC verification urgency trigger")
+    elif any(k in text_lower for k in ["otp", "pin", "password", "cvv"]):
+        reasons.append("Sensitive authentication data request")
+    elif any(k in text_lower for k in ["win", "winner", "prize", "lottery", "reward", "free", "claim"]):
+        reasons.append("Financial lure / reward bait detected")
+    elif any(k in text_lower for k in ["save the internet settings", "install", "apk", "update"]):
+        reasons.append("Device configuration / download prompt")
+
     if ml_prob >= 0.60:
-        reasons.append("High semantic probability of social engineering or coercion")
+        reasons.append(f"NLP model flagged social engineering ({int(ml_prob * 100)}% confidence)")
     if not reasons:
         reasons.append("No actionable malicious indicators found")
+
+    # Preserve exact deterministic order (no random set())
+    ordered_reasons = list(dict.fromkeys(reasons))
 
     tier = "HIGH" if final_score >= 70 else ("MEDIUM" if final_score >= 35 else "LOW")
     category = "PHISHING" if tier == "HIGH" else ("SUSPICIOUS" if tier == "MEDIUM" else "SAFE")
@@ -155,11 +190,12 @@ def fuse_signals(item_id, text, ml_prob, sorted_urls, worst_url_ratio, sender_pe
         "riskLevel": tier,
         "category": category,
         "mlProbability": round(ml_prob, 4),
-        "reasons": list(set(reasons)),
+        "reasons": ordered_reasons,
         "sortedThreatUrls": sorted_urls,
         "urlCount": len(sorted_urls),
         "modelVersion": model_ver
     }
+
 
 class EmailRequest(BaseModel):
     id: str = "msg_001"
@@ -168,16 +204,23 @@ class EmailRequest(BaseModel):
     body: str = ""
     urls: Optional[List[str]] = []
 
+
 class SMSRequest(BaseModel):
     id: str = "sms_001"
     text: str = Field(min_length=1)
 
+
 class BatchEmailRequest(BaseModel):
     emails: List[EmailRequest]
 
+
 @app.get("/health")
 def health():
-    return {"status": "OPERATIONAL", "models": [artifacts["email_meta"]["model_version"], artifacts["sms_meta"]["model_version"]]}
+    return {
+        "status": "OPERATIONAL",
+        "models": [artifacts["email_meta"]["model_version"], artifacts["sms_meta"]["model_version"]],
+    }
+
 
 @app.post("/predict/email")
 def predict_email(req: EmailRequest):
@@ -191,7 +234,17 @@ def predict_email(req: EmailRequest):
     sorted_urls, worst_ratio = analyze_urls(raw_full, req.urls)
     s_pen, s_reasons = inspect_sender_spoofing(req.sender)
 
-    return fuse_signals(req.id, raw_full, ml_prob, sorted_urls, worst_ratio, s_pen, s_reasons, artifacts["email_meta"]["model_version"])
+    return fuse_signals(
+        req.id,
+        raw_full,
+        ml_prob,
+        sorted_urls,
+        worst_ratio,
+        s_pen,
+        s_reasons,
+        artifacts["email_meta"]["model_version"],
+    )
+
 
 @app.post("/predict/sms")
 def predict_sms(req: SMSRequest):
@@ -204,7 +257,17 @@ def predict_sms(req: SMSRequest):
     scam_prob, _ = decide(proba)
     sorted_urls, worst_ratio = analyze_urls(req.text)
 
-    return fuse_signals(req.id, req.text, scam_prob, sorted_urls, worst_ratio, 0.0, [], artifacts["sms_meta"]["model_version"])
+    return fuse_signals(
+        req.id,
+        req.text,
+        scam_prob,
+        sorted_urls,
+        worst_ratio,
+        0.0,
+        [],
+        artifacts["sms_meta"]["model_version"],
+    )
+
 
 @app.post("/predict/email/batch")
 def predict_email_batch(req: BatchEmailRequest):
