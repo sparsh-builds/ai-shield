@@ -45,7 +45,7 @@ module.exports = function withShieldBridge(config) {
     android:description="@string/accessibility_service_description"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds"
     android:canRetrieveWindowContent="true"
     android:notificationTimeout="100" />
 `,
@@ -56,12 +56,13 @@ module.exports = function withShieldBridge(config) {
       const javaDir = path.join(root, 'app', 'src', 'main', 'java', 'com', 'aishield');
       fs.mkdirSync(javaDir, { recursive: true });
 
-      // File 1: ShieldAccessibilityService.kt (Filtered & Deterministic Text Scraper)
+      // File 1: ShieldAccessibilityService.kt (With Multi-Window Fallback for Gmail WebView)
       const accessibilityKt = `package com.aishield
 
 import android.accessibilityservice.AccessibilityService
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 
 data class ScreenContent(val packageName: String, val rawText: String, val lines: List<String>)
 
@@ -86,16 +87,21 @@ class ShieldAccessibilityService : AccessibilityService() {
     }
 
     fun captureCurrentAppText(): ScreenContent {
-        val rootNode = rootInActiveWindow ?: return ScreenContent("", "", emptyList())
-        val pkg = rootNode.packageName?.toString() ?: ""
+        val activeRoot = rootInActiveWindow
+            ?: windows?.firstOrNull {
+                it.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                it.root != null &&
+                it.root?.packageName?.toString() != "com.aishield"
+            }?.root
+            ?: return ScreenContent("", "", emptyList())
 
-        // Ignore system UI or AI Shield itself
+        val pkg = activeRoot.packageName?.toString() ?: ""
         if (pkg == "com.android.systemui" || pkg == "com.aishield") {
             return ScreenContent(pkg, "", emptyList())
         }
 
         val collected = LinkedHashSet<String>()
-        traverseNode(rootNode, collected)
+        traverseNode(activeRoot, collected)
 
         val cleanLines = collected.toList()
         val combined = cleanLines.joinToString("\\n").trim()
@@ -105,14 +111,16 @@ class ShieldAccessibilityService : AccessibilityService() {
     private fun traverseNode(node: AccessibilityNodeInfo?, collected: LinkedHashSet<String>) {
         if (node == null) return
 
-        val raw = node.text?.toString()?.trim() ?: node.contentDescription?.toString()?.trim()
+        val textStr = node.text?.toString()?.trim()
+        val descStr = node.contentDescription?.toString()?.trim()
+        val raw = if (!textStr.isNullOrEmpty()) textStr else descStr
+
         if (!raw.isNullOrEmpty()) {
-            val isUrlOrEmail = raw.contains("http://", true) || raw.contains("https://", true) || raw.contains("@")
+            val isUrlOrEmail = raw.contains("http://", true) || raw.contains("https://", true) || raw.contains("@") || raw.contains(".")
             val isClock = raw.matches(Regex("^\\\\d{1,2}:\\\\d{2}(\\\\s?[APMapm]{2})?$"))
             val isPercent = raw.matches(Regex("^\\\\d{1,3}%$"))
 
-            // Keep meaningful sentences (>12 chars) or any URL/email; drop clocks & tiny nav labels
-            if (!isClock && !isPercent && (raw.length > 12 || isUrlOrEmail)) {
+            if (!isClock && !isPercent && (raw.length > 4 || isUrlOrEmail)) {
                 collected.add(raw)
             }
         }
@@ -125,7 +133,7 @@ class ShieldAccessibilityService : AccessibilityService() {
 `;
       fs.writeFileSync(path.join(javaDir, 'ShieldAccessibilityService.kt'), accessibilityKt, 'utf8');
 
-      // File 2: FloatingBubbleService.kt (Extracts Real Subject, Sender & URLs)
+      // File 2: FloatingBubbleService.kt
       const bubbleKt = `package com.aishield
 
 import android.app.Service
@@ -226,7 +234,10 @@ class FloatingBubbleService : Service() {
     }
 
     private fun extractUrls(text: String): JSONArray {
-        val urlRegex = Regex("https?://[^\\\\s\\"'>)]+", RegexOption.IGNORE_CASE)
+        val urlRegex = Regex(
+            "(?:https?://)?(?:www\\\\.)?(?:\\\\d{1,3}(?:\\\\.\\\\d{1,3}){3}|bit\\\\.ly|tinyurl\\\\.com|t\\\\.co|goo\\\\.gl|is\\\\.gd|cutt\\\\.ly|ow\\\\.ly|[a-zA-Z0-9-]+\\\\.(?:com|in|xyz|top|click|tk|ml|ga|cf|gq|work|zip|net|org|co\\\\.in))(?:/[^\\\\s\\"'>)]*)?",
+            RegexOption.IGNORE_CASE
+        )
         val urls = JSONArray()
         urlRegex.findAll(text).map { it.value }.distinct().forEach { urls.put(it) }
         return urls
@@ -250,7 +261,7 @@ class FloatingBubbleService : Service() {
         val textToScan = screenData.rawText
 
         if (textToScan.isBlank()) {
-            Toast.makeText(this, "Open an Email or SMS first, then tap bubble", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "No readable text found — scroll email slightly & tap again", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -309,7 +320,11 @@ class FloatingBubbleService : Service() {
     }
 
     private fun displayMiniReport(score: Int, category: String, reasons: JSONArray) {
-        val firstReason = if (reasons.length() > 0) reasons.getString(0) else "No threats detected"
+        val topReasons = mutableListOf<String>()
+        for (i in 0 until minOf(reasons.length(), 2)) {
+            topReasons.add("• " + reasons.getString(i))
+        }
+        val reasonText = if (topReasons.isNotEmpty()) topReasons.joinToString("\\n") else "• Clean"
         val alertBadge = when {
             score >= 70 -> "HIGH RISK"
             score >= 35 -> "SUSPICIOUS"
@@ -318,7 +333,7 @@ class FloatingBubbleService : Service() {
 
         Toast.makeText(
             this,
-            "$alertBadge ($score/100)\\nCategory: $category\\nReason: $firstReason",
+            "$alertBadge ($score/100) [$category]\\n$reasonText",
             Toast.LENGTH_LONG
         ).show()
     }
