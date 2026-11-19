@@ -76,9 +76,7 @@ class ShieldAccessibilityService : AccessibilityService() {
         instance = this
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Passive mode: reads only when user taps the floating bubble
-    }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
     override fun onInterrupt() {}
 
@@ -109,17 +107,27 @@ class ShieldAccessibilityService : AccessibilityService() {
 `;
       fs.writeFileSync(path.join(javaDir, 'ShieldAccessibilityService.kt'), accessibilityKt, 'utf8');
 
-      // File 2: FloatingBubbleService.kt (Connected to live Render URL)
+      // File 2: FloatingBubbleService.kt
       const bubbleKt = `package com.aishield
 
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
-import android.view.*
-import android.widget.*
-import kotlinx.coroutines.*
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
+import android.widget.ImageView
+import android.widget.Toast
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -136,7 +144,7 @@ class FloatingBubbleService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -198,7 +206,7 @@ class FloatingBubbleService : Service() {
                         put("subject", "Scraped Screen Content")
                         put("sender", "")
                         put("body", textToScan)
-                        put("urls", org.json.JSONArray())
+                        put("urls", JSONArray())
                     } else {
                         put("text", textToScan)
                     }
@@ -236,12 +244,12 @@ class FloatingBubbleService : Service() {
         }
     }
 
-    private fun displayMiniReport(score: Int, category: String, reasons: org.json.JSONArray) {
+    private fun displayMiniReport(score: Int, category: String, reasons: JSONArray) {
         val firstReason = if (reasons.length() > 0) reasons.getString(0) else "Clean"
         val alertColor = when {
-            score >= 70 -> "🔴 HIGH RISK"
-            score >= 35 -> "🟡 SUSPICIOUS"
-            else -> "🟢 SAFE"
+            score >= 70 -> "HIGH RISK"
+            score >= 35 -> "SUSPICIOUS"
+            else -> "SAFE"
         }
 
         Toast.makeText(
@@ -278,20 +286,20 @@ class ShieldBridgeModule(private val reactContext: ReactApplicationContext) :
     override fun getName(): String = "ShieldBridge"
 
     @ReactMethod
-    fun openAccessibilitySettings(promise: Promise? = null) {
+    fun openAccessibilitySettings(promise: Promise) {
         try {
             val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             reactContext.startActivity(intent)
-            promise?.resolve(true)
+            promise.resolve(true)
         } catch (e: Exception) {
-            promise?.reject("ERR_ACCESSIBILITY", e)
+            promise.reject("ERR_ACCESSIBILITY", e)
         }
     }
 
     @ReactMethod
-    fun openOverlaySettings(promise: Promise? = null) {
+    fun openOverlaySettings(promise: Promise) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(reactContext)) {
                 val intent = Intent(
@@ -302,37 +310,45 @@ class ShieldBridgeModule(private val reactContext: ReactApplicationContext) :
                 }
                 reactContext.startActivity(intent)
             } else {
-                startBubbleService(null)
+                val intent = Intent(reactContext, FloatingBubbleService::class.java)
+                reactContext.startService(intent)
             }
-            promise?.resolve(true)
+            promise.resolve(true)
         } catch (e: Exception) {
-            promise?.reject("ERR_OVERLAY", e)
+            promise.reject("ERR_OVERLAY", e)
         }
     }
 
     @ReactMethod
-    fun startBubbleService(promise: Promise? = null) {
+    fun startBubbleService(promise: Promise) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(reactContext)) {
-                openOverlaySettings(promise)
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + reactContext.packageName)
+                ).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                reactContext.startActivity(intent)
+                promise.resolve(false)
                 return
             }
             val intent = Intent(reactContext, FloatingBubbleService::class.java)
             reactContext.startService(intent)
-            promise?.resolve(true)
+            promise.resolve(true)
         } catch (e: Exception) {
-            promise?.reject("ERR_BUBBLE", e)
+            promise.reject("ERR_BUBBLE", e)
         }
     }
 
     @ReactMethod
-    fun stopBubbleService(promise: Promise? = null) {
+    fun stopBubbleService(promise: Promise) {
         try {
             val intent = Intent(reactContext, FloatingBubbleService::class.java)
             reactContext.stopService(intent)
-            promise?.resolve(true)
+            promise.resolve(true)
         } catch (e: Exception) {
-            promise?.reject("ERR_STOP_BUBBLE", e)
+            promise.reject("ERR_STOP_BUBBLE", e)
         }
     }
 }
