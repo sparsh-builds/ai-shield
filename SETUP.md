@@ -49,31 +49,17 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8000
 
 ---
 
-## 4️⃣ Network & Backend IP Configuration (Terminal 2)
+## 4️⃣ Backend URL Configuration (Terminal 2)
 
-Connect your **Android phone and PC to the same Wi-Fi network or Mobile Hotspot**, then find your PC's local IPv4 address:
+The app already points to the hosted backend, `https://ai-shield-backend-6o9v.onrender.com`, in `frontend/src/config.ts`, `frontend/src/api.ts` and the bubble service. You do **not** need a local backend or a LAN IP to run the app.
 
-```bash
-# Windows:
-ipconfig
-# Mac / Linux:
-ifconfig
-```
-*(Copy your **IPv4 Address**, e.g., `192.168.43.105`).*
+To test against your own local backend instead:
 
-**Update this IP address in 2 files:**
+1. Find your PC's IPv4 address (`ipconfig` on Windows, `ifconfig` on Mac/Linux). Keep the phone and PC on the same Wi-Fi or hotspot.
+2. Replace the URL in `frontend/src/config.ts`, the `BASE_URL` constant in `frontend/src/api.ts`, and the `BACKEND_URL` constant in `FloatingBubbleService.kt`, all with `http://<your-IPv4>:8000`.
+3. Open `http://<your-IPv4>:8000/health` in the phone's browser and confirm `OPERATIONAL` loads before building the APK.
 
-1. **`frontend/src/config.ts`**:
-   ```ts
-   export const API_URL = '[http://192.168.](http://192.168.)X.X:8000'; // Replace with your PC's IPv4
-   ```
-
-2. **`frontend/android/app/src/main/java/com/aishield/FloatingBubbleService.kt`**:
-   ```kotlin
-   private val BACKEND_URL = "[http://192.168.](http://192.168.)X.X:8000" // Replace with your PC's IPv4
-   ```
-
-> **Phone Reachability Check:** Open Chrome on your phone and visit `http://192.168.X.X:8000/health`. Confirm `OPERATIONAL` loads before building the APK.
+> **Cold starts:** The hosted Render free tier sleeps when idle. The first scan can take up to about 45 seconds, and the app shows `WAKING` until the backend responds.
 
 ---
 

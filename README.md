@@ -64,12 +64,24 @@ ai-shield/
 
 The FastAPI backend (`ml/main.py`) evaluates every scanned message across three independent threat signals:
 
-$$\text{Final Score} = (\text{ML\_Probability} \times 50) + (\text{Worst\_URL\_Score} \times 30) + (\text{Sender\_Penalty} \times 20)$$
+$$\text{Score} = (\text{ML\_Probability} \times 45) + (\text{Worst\_URL\_Score} \times 35) + (\text{Sender\_Penalty} \times 20) + (\text{Intent\_Rule\_Boost} \times 40)$$
 
-1. **NLP Classifier (`50%` weight):** TF-IDF vectorization paired with trained Linear/SVM classifiers (`email-v1.0` & `sms-v1.0`) trained on phishing and spam corpora.
-2. **URL & Domain Heuristics (`30%` weight):** Flags raw IP URLs, suspicious TLDs (`.xyz`, `.top`, `.tk`, `.click`), URL shorteners (`bit.ly`, `tinyurl`), and credential-harvesting paths.
-3. **Sender Spoofing Check (`20%` weight):** Cross-checks brand mentions (SBI, HDFC, ICICI, Paytm, Amazon, etc.) against official sender domains.
-   * **Hard Override Rule:** If sender spoofing or a critical malicious URL is detected alongside an ML probability $\ge 0.25$, the final risk score automatically escalates to $\ge 82$ (**HIGH RISK**).
+1. **NLP Classifier (`45` points):** TF-IDF vectorization paired with trained Linear/SVM classifiers (`email-v1.0` & `sms-v1.0`) trained on phishing and spam corpora.
+2. **URL & Domain Heuristics (`35` points):** Flags raw IP URLs, suspicious TLDs (`.xyz`, `.top`, `.tk`, `.click`), URL shorteners (`bit.ly`, `tinyurl`), and credential-harvesting paths.
+3. **Sender Spoofing Check (`20` points):** Cross-checks brand mentions (SBI, HDFC, ICICI, Paytm, Amazon, etc.) against official sender domains.
+4. **Intent Rules (`40` points, capped at `0.60`):** Phrase rules for KYC/account pressure, OTP or credential requests, prize lures and APK-install prompts. Each reason names the phrase that matched.
+   * **Hard Override Rules:** A spoofed sender or a critical URL together with an ML probability or rule boost $\ge 0.25$ raises the score to at least $84$ (**HIGH RISK**). A high-risk URL with a rule boost $\ge 0.25$ raises it to at least $72$.
+   * **Event Cap:** Event or newsletter wording with no URL, sender or rule signals is capped at $24$.
+   * **Tiers:** `HIGH` $\ge 70$ (PHISHING), `MEDIUM` $35$–$69$ (SUSPICIOUS), `LOW` $< 35$ (SAFE).
+   * **Reasons:** Each result returns up to 4 message-specific reasons. SAFE results list what was checked and passed (sender domain, links, absence of OTP/KYC pressure). Risky results list the signals that fired, with the link or phrase quoted.
+
+## 🔐 Permissions
+
+- **Display over other apps** (`SYSTEM_ALERT_WINDOW`): needed for the floating bubble.
+- **Accessibility Service:** reads on-screen text only in Gmail, Google Messages and Samsung Messages (restricted with `packageNames` in `accessibility_service_config.xml`).
+- **Internet** and **Vibrate:** normal permissions, granted at install.
+
+The app also supports manual copy-paste scanning, which needs none of the accessibility or overlay permissions.
 
 ---
 
