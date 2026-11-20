@@ -20,6 +20,7 @@ EMAIL_MAX_CHARS = 50000
 SMS_MAX_CHARS = 5000
 MAX_URLS_PER_REQUEST = 50
 MAX_BATCH_SIZE = 50
+MAX_REASONS = 4
 
 artifacts: Dict[str, Any] = {}
 
@@ -77,13 +78,17 @@ PROTECTED_BRANDS = {
 }
 
 
+def extract_sender_domain(sender_raw: str) -> str:
+    match = re.search(r"[\w\.-]+@([\w\.-]+)", (sender_raw or "").lower())
+    return match.group(1) if match else ""
+
+
 def inspect_sender_spoofing(sender_raw: str) -> tuple[float, List[str]]:
     sender_lower = (sender_raw or "").lower().strip()
     if not sender_lower:
         return 0.0, []
 
-    email_match = re.search(r"[\w\.-]+@([\w\.-]+)", sender_lower)
-    actual_domain = email_match.group(1) if email_match else ""
+    actual_domain = extract_sender_domain(sender_lower)
 
     reasons = []
     penalty = 0.0
@@ -175,7 +180,7 @@ def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
             "hostname": hostname,
             "riskScore": norm_score,
             "threatLevel": level,
-            "indicators": indicators or ["Verified standard domain structure"]
+            "indicators": indicators or ["Verified standard domain structure"],
         })
 
     reports.sort(key=lambda x: x["riskScore"], reverse=True)
@@ -184,27 +189,68 @@ def analyze_urls(text: str, external_urls: Optional[List[str]] = None):
 
 
 # ----------------- INTENT & SOCIAL ENGINEERING RULES -----------------
+INTENT_RULES = [
+    (r"\b(kyc|pan card|aadhaar|account blocked|account suspended|verify your account|reactivate)\b", 0.35,
+     "Account/KYC suspension pressure"),
+    (r"\b(share otp|enter otp|send otp|pin|password|cvv|card number)\b", 0.40,
+     "Asks for OTP / credentials"),
+    (r"\b(you have won|you won|claim your prize|lottery winner|jackpot|cash reward|claim free gift)\b", 0.30,
+     "Unsolicited prize / reward lure"),
+    (r"\b(save the internet settings|install apk|download apk|allow unknown sources)\b", 0.35,
+     "Asks to install an APK / change settings"),
+]
+
+
 def analyze_intent_rules(text_lower: str) -> tuple[float, List[str]]:
     boost = 0.0
     triggers = []
-
-    if re.search(r"\b(kyc|pan card|aadhaar|account blocked|account suspended|verify your account|reactivate)\b", text_lower):
-        boost += 0.35
-        triggers.append("Account/KYC suspension urgency trigger")
-
-    if re.search(r"\b(share otp|enter otp|send otp|pin|password|cvv|card number)\b", text_lower):
-        boost += 0.40
-        triggers.append("Sensitive credential / OTP harvesting attempt")
-
-    if re.search(r"\b(you have won|you won|claim your prize|lottery winner|jackpot|cash reward|claim free gift)\b", text_lower):
-        boost += 0.30
-        triggers.append("Unsolicited financial reward / lottery lure")
-
-    if re.search(r"\b(save the internet settings|install apk|download apk|allow unknown sources)\b", text_lower):
-        boost += 0.35
-        triggers.append("Malicious configuration / APK sideload prompt")
-
+    for pattern, weight, label in INTENT_RULES:
+        match = re.search(pattern, text_lower)
+        if match:
+            boost += weight
+            triggers.append(f"{label} (matched '{match.group(0)}')")
     return min(0.60, boost), triggers
+
+
+# ----------------- MESSAGE-SPECIFIC REASONS -----------------
+def build_reasons(
+    tier: str,
+    sender_reasons: List[str],
+    sorted_urls: List[Dict[str, Any]],
+    rule_reasons: List[str],
+    ml_prob: float,
+    sender_domain: str,
+    benign_event: bool,
+) -> List[str]:
+    reasons: List[str] = []
+
+    if tier == "LOW":
+        if benign_event:
+            reasons.append("Event/newsletter wording with no risky links, sender or credential requests")
+        if sender_domain:
+            reasons.append(f"Sender domain '{sender_domain}' does not match any protected brand")
+        if sorted_urls:
+            hosts = ", ".join(u["hostname"] for u in sorted_urls[:3])
+            reasons.append(f"{len(sorted_urls)} link(s) checked, none flagged: {hosts}")
+        else:
+            reasons.append("No links found in the message")
+        if not rule_reasons:
+            reasons.append("No OTP, KYC, prize or APK-install pressure found")
+        if ml_prob < 0.25:
+            reasons.append(f"Text classifier scored it low ({int(ml_prob * 100)}% scam probability)")
+        return list(dict.fromkeys(reasons))[:MAX_REASONS]
+
+    reasons.extend(sender_reasons)
+    if sorted_urls and sorted_urls[0]["riskScore"] > 0:
+        worst = sorted_urls[0]
+        reasons.append(f"{worst['indicators'][0]} — link '{worst['url']}'")
+        reasons.extend(f"{ind} — link '{worst['url']}'" for ind in worst["indicators"][1:])
+    reasons.extend(rule_reasons)
+    if ml_prob >= 0.65:
+        reasons.append(f"Text classifier flags social-engineering wording ({int(ml_prob * 100)}% confidence)")
+    if not reasons:
+        reasons.append("Overall text pattern is unusual; verify the sender before opening any link")
+    return list(dict.fromkeys(reasons))[:MAX_REASONS]
 
 
 # ----------------- FUSION FORMULATION (ZERO CONTRADICTION) -----------------
@@ -218,9 +264,11 @@ def fuse_signals(
     sender_reasons: List[str],
     model_ver: str,
     extra_fields: Optional[Dict[str, Any]] = None,
+    sender_domain: str = "",
 ):
     text_lower = text.lower()
     rule_boost, rule_reasons = analyze_intent_rules(text_lower)
+    is_benign_event = bool(re.search(r"\b(hackathon|workshop|techfest|grand finale|problem statement|registration)\b", text_lower))
 
     composite = (ml_prob * 45.0) + (worst_url_ratio * 35.0) + (sender_penalty * 20.0) + (rule_boost * 40.0)
 
@@ -229,7 +277,6 @@ def fuse_signals(
     elif worst_url_ratio >= 0.40 and rule_boost >= 0.25:
         composite = max(composite, 72.0)
 
-    is_benign_event = bool(re.search(r"\b(hackathon|workshop|techfest|grand finale|problem statement|registration)\b", text_lower))
     if is_benign_event and worst_url_ratio == 0.0 and sender_penalty == 0.0 and rule_boost == 0.0:
         composite = min(composite, 24.0)
 
@@ -238,22 +285,15 @@ def fuse_signals(
     tier = "HIGH" if final_score >= 70 else ("MEDIUM" if final_score >= 35 else "LOW")
     category = "PHISHING" if tier == "HIGH" else ("SUSPICIOUS" if tier == "MEDIUM" else "SAFE")
 
-    reasons: List[str] = []
-    if tier == "LOW":
-        reasons.append("No malicious URLs, spoofing, or credential traps detected")
-    else:
-        reasons.extend(sender_reasons)
-        if sorted_urls and sorted_urls[0]["riskScore"] > 0:
-            target = sorted_urls[0]["url"]
-            reasons.append(f"{sorted_urls[0]['indicators'][0]} ({target})")
-            reasons.extend(sorted_urls[0]["indicators"][1:])
-        reasons.extend(rule_reasons)
-        if ml_prob >= 0.65:
-            reasons.append(f"NLP classifier detected social-engineering patterns ({int(ml_prob * 100)}% confidence)")
-        if not reasons:
-            reasons.append("Elevated linguistic anomaly score — verify sender before clicking links")
-
-    ordered_reasons = list(dict.fromkeys(reasons))
+    ordered_reasons = build_reasons(
+        tier=tier,
+        sender_reasons=sender_reasons,
+        sorted_urls=sorted_urls,
+        rule_reasons=rule_reasons,
+        ml_prob=ml_prob,
+        sender_domain=sender_domain,
+        benign_event=is_benign_event and final_score <= 24,
+    )
 
     result: Dict[str, Any] = {
         "id": item_id,
@@ -322,6 +362,7 @@ def predict_email(req: EmailRequest):
         s_pen,
         s_reasons,
         artifacts["email_meta"]["model_version"],
+        sender_domain=extract_sender_domain(req.sender or ""),
     )
 
 

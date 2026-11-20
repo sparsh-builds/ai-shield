@@ -3,7 +3,6 @@ const fs = require('fs');
 const path = require('path');
 
 module.exports = function withShieldBridge(config) {
-  // 1. Register ShieldBridgePackage in MainApplication.kt
   config = withMainApplication(config, (config) => {
     let contents = config.modResults.contents;
     if (!contents.includes('ShieldBridgePackage')) {
@@ -16,7 +15,6 @@ module.exports = function withShieldBridge(config) {
     return config;
   });
 
-  // 2. Add Accessibility description string in strings.xml
   config = withStringsXml(config, (config) => {
     const strings = config.modResults.resources.string || [];
     if (!strings.some((s) => s.$.name === 'accessibility_service_description')) {
@@ -29,13 +27,11 @@ module.exports = function withShieldBridge(config) {
     return config;
   });
 
-  // 3. Auto-generate XML config + All 4 Native Kotlin Files
   config = withDangerousMod(config, [
     'android',
     async (config) => {
       const root = config.modRequest.platformProjectRoot;
 
-      // 3a. accessibility_service_config.xml
       const xmlDir = path.join(root, 'app', 'src', 'main', 'res', 'xml');
       fs.mkdirSync(xmlDir, { recursive: true });
       fs.writeFileSync(
@@ -47,16 +43,15 @@ module.exports = function withShieldBridge(config) {
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds"
     android:canRetrieveWindowContent="true"
+    android:packageNames="com.google.android.gm,com.google.android.apps.messaging,com.samsung.android.messaging,com.android.mms"
     android:notificationTimeout="100" />
 `,
         'utf8'
       );
 
-      // 3b. Native Kotlin Files in com/aishield
       const javaDir = path.join(root, 'app', 'src', 'main', 'java', 'com', 'aishield');
       fs.mkdirSync(javaDir, { recursive: true });
 
-      // File 1: ShieldAccessibilityService.kt
       const accessibilityKt = `package com.aishield
 
 import android.accessibilityservice.AccessibilityService
@@ -133,7 +128,6 @@ class ShieldAccessibilityService : AccessibilityService() {
 `;
       fs.writeFileSync(path.join(javaDir, 'ShieldAccessibilityService.kt'), accessibilityKt, 'utf8');
 
-      // File 2: FloatingBubbleService.kt (With Native Audio Alerts + Vibration)
       const bubbleKt = `package com.aishield
 
 import android.app.Service
@@ -384,7 +378,6 @@ class FloatingBubbleService : Service() {
 `;
       fs.writeFileSync(path.join(javaDir, 'FloatingBubbleService.kt'), bubbleKt, 'utf8');
 
-      // File 3: ShieldBridgeModule.kt
       const moduleKt = `package com.aishield
 
 import android.content.Intent
@@ -451,7 +444,6 @@ class ShieldBridgeModule(private val reactContext: ReactApplicationContext) :
 `;
       fs.writeFileSync(path.join(javaDir, 'ShieldBridgeModule.kt'), moduleKt, 'utf8');
 
-      // File 4: ShieldBridgePackage.kt
       const packageKt = `package com.aishield
 
 import com.facebook.react.ReactPackage
@@ -475,7 +467,6 @@ class ShieldBridgePackage : ReactPackage {
     },
   ]);
 
-  // 4. Register Services & Permissions in AndroidManifest.xml
   config = withAndroidManifest(config, (config) => {
     const manifest = config.modResults.manifest;
     const app = manifest.application[0];
@@ -483,7 +474,6 @@ class ShieldBridgePackage : ReactPackage {
     manifest['uses-permission'] = manifest['uses-permission'] || [];
     const perms = [
       'android.permission.SYSTEM_ALERT_WINDOW',
-      'android.permission.FOREGROUND_SERVICE',
       'android.permission.INTERNET',
       'android.permission.VIBRATE',
     ];
